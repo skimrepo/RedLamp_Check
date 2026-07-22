@@ -1,6 +1,7 @@
 import argparse
 import numpy as np
 import os
+import shutil
 import time
 
 import torch
@@ -603,22 +604,20 @@ if __name__ == '__main__':
             np.save(f'{test_save_dir}/anomaly_score.npy',anomaly_score)
 
 
+        # tsne_embeddings.png and ts_example_plots/ are always (re)generated,
+        # regardless of whether training/testing was skipped this run.
         tsne_save_path = f'{model_dir}/tsne_embeddings.png'
-        if not args.skip_tsne and not os.path.isfile(tsne_save_path):
+        if not args.skip_tsne:
             print('t-SNE embedding plot')
             embeddings, class_idx = extract_embeddings(model_dir, params, device, val_dataloader, max_samples=args.tsne_max_samples)
             plot_tsne_embeddings(embeddings, class_idx, val_dataloader.anomaly_dict, tsne_save_path,
                                   title=f'{args.dataset} / {entity} (val, n={len(embeddings)})',
                                   perplexity=args.tsne_perplexity, seed=args.seed)
-        elif os.path.isfile(tsne_save_path):
-            print(tsne_save_path, 'exists')
 
         examples_save_dir = f'{model_dir}/ts_example_plots'
-        if not os.path.isdir(examples_save_dir) or not os.listdir(examples_save_dir):
-            print('Example anomaly-type plots')
-            save_anomaly_type_examples(val_dataloader, examples_save_dir, n_examples=3, seed=args.seed)
-        else:
-            print(examples_save_dir, 'exists')
+        print('Example anomaly-type plots')
+        shutil.rmtree(examples_save_dir, ignore_errors=True)
+        save_anomaly_type_examples(val_dataloader, examples_save_dir, n_examples=3, seed=args.seed)
 
 
         if entity in ['smap','msl']:
