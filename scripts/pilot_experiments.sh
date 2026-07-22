@@ -3,11 +3,14 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-# One-time environment setup (idempotent: skipped if .venv already exists)
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
+VENV_DIR="/home/aibiz/setup/volumes/core/.venv"
+
+# One-time environment setup (idempotent: skipped if VENV_DIR already exists)
+if [ ! -d "$VENV_DIR" ]; then
+  mkdir -p "$(dirname "$VENV_DIR")"
+  python3 -m venv "$VENV_DIR"
 fi
-source .venv/bin/activate
+source "$VENV_DIR/bin/activate"
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu113
 
 gpu=0
