@@ -14,6 +14,13 @@ import utils
 import datautils
 
 
+# Shared chart palette (categorical hues extended via marker/shade for >8 classes)
+CHART_COLORS = ['#2a78d6', '#1baf7a', '#eda100', '#008300',
+                '#4a3aa7', '#e34948', '#e87ba4', '#eb6834']
+CHART_MARKERS = ['o', '^', 's', 'D']
+SURFACE, GRID, AXIS, MUTED, INK, INK2 = '#fcfcfb', '#e1e0d9', '#c3c2b7', '#898781', '#0b0b0b', '#52514e'
+
+
 
 def model_parameters(args):
     params_model = utils.AttrDict(
@@ -244,11 +251,6 @@ def extract_embeddings(model_dir, params, device, val_dataloader, max_samples=20
 def plot_tsne_embeddings(embeddings, class_idx, anomaly_dict, save_path, title=None, perplexity=30, seed=0):
     # Categorical palette (8 validated hues) extended to >8 classes via a secondary
     # marker encoding, so identity is never carried by color alone beyond slot 8.
-    CHART_COLORS = ['#2a78d6', '#1baf7a', '#eda100', '#008300',
-                     '#4a3aa7', '#e34948', '#e87ba4', '#eb6834']
-    CHART_MARKERS = ['o', '^', 's', 'D']
-    SURFACE, GRID, AXIS, MUTED, INK, INK2 = '#fcfcfb', '#e1e0d9', '#c3c2b7', '#898781', '#0b0b0b', '#52514e'
-
     n_samples = embeddings.shape[0]
     eff_perplexity = max(5, min(perplexity, n_samples - 1))
     reduced = TSNE(n_components=2, perplexity=eff_perplexity, random_state=seed, init='pca').fit_transform(embeddings)
@@ -279,6 +281,61 @@ def plot_tsne_embeddings(embeddings, class_idx, anomaly_dict, save_path, title=N
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
+
+
+def plot_example_window(Y_window, mask_window, title, save_path):
+    # Y_window/mask_window: (n_features, window_size)
+    n_features, window_size = Y_window.shape
+    affected = np.where(mask_window.sum(axis=1) < window_size)[0]
+    feature_idxs = affected[:3] if len(affected) > 0 else [0]
+
+    fig, ax = plt.subplots(figsize=(8, 3), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    for j, feat in enumerate(feature_idxs):
+        label = f'feature {feat}' if len(feature_idxs) > 1 else None
+        ax.plot(Y_window[feat], color=CHART_COLORS[j % len(CHART_COLORS)], linewidth=1.2, label=label)
+
+    if len(affected) > 0:
+        anomaly_idxs = np.where(mask_window[feature_idxs[0]] == 0)[0]
+        if len(anomaly_idxs) > 0:
+            ax.axvspan(anomaly_idxs.min(), anomaly_idxs.max() + 1, color='#e34948', alpha=0.15)
+
+    ax.set_title(title, color=INK, fontsize=10)
+    ax.tick_params(colors=MUTED, labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_color(AXIS)
+    ax.grid(True, color=GRID, linewidth=0.5)
+    if len(feature_idxs) > 1:
+        legend = ax.legend(fontsize=7, frameon=False)
+        plt.setp(legend.get_texts(), color=INK2)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def save_anomaly_type_examples(val_dataloader, anomaly_dict, save_dir, n_examples=3):
+    os.makedirs(save_dir, exist_ok=True)
+    inverse_dict = {v: k for k, v in anomaly_dict.items()}
+
+    windows_by_class = {c: [] for c in anomaly_dict.values()}
+    masks_by_class = {c: [] for c in anomaly_dict.values()}
+    for batch in val_dataloader:
+        Y = batch['Y'].numpy()  # (batch, n_features, window)
+        mask = batch['anomaly_mask'].numpy()
+        labels = batch['label'].argmax(dim=1).numpy()
+        for i, c in enumerate(labels):
+            if len(windows_by_class[c]) < n_examples:
+                windows_by_class[c].append(Y[i])
+                masks_by_class[c].append(mask[i])
+        if all(len(w) >= n_examples for w in windows_by_class.values()):
+            break
+
+    for c, windows in windows_by_class.items():
+        type_name = inverse_dict[c]
+        for i, (Y_window, mask_window) in enumerate(zip(windows, masks_by_class[c]), start=1):
+            save_path = f'{save_dir}/{type_name}_{i}.png'
+            plot_example_window(Y_window, mask_window, title=f'{type_name} (example {i})', save_path=save_path)
 
 
 def convolve_minmax_score(score, w=50, minmax=True):
@@ -529,6 +586,13 @@ if __name__ == '__main__':
                                   perplexity=args.tsne_perplexity, seed=args.seed)
         elif os.path.isfile(tsne_save_path):
             print(tsne_save_path, 'exists')
+
+        examples_save_dir = f'{model_dir}/ts_example_plots'
+        if not os.path.isdir(examples_save_dir) or not os.listdir(examples_save_dir):
+            print('Example anomaly-type plots')
+            save_anomaly_type_examples(val_dataloader, val_dataloader.anomaly_dict, examples_save_dir, n_examples=3)
+        else:
+            print(examples_save_dir, 'exists')
 
 
         if entity in ['smap','msl']:
