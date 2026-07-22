@@ -3,26 +3,44 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-# Pre-flight dataset check. anomaly_archive/smd auto-download inside main.py if
-# missing, but smap/msl (NASA) and iops have no auto-download and must already
-# be in place, so fail fast here instead of mid-run.
+# Which datasets to run. Defaults to all 5; pass a subset as args, e.g.:
+#   sh scripts/pilot_experiments.sh smd
+#   sh scripts/pilot_experiments.sh smd iops
+datasets="${*:-anomaly_archive iops smd smap msl}"
+
+# Pre-flight dataset check, scoped to whichever datasets were selected above.
+# anomaly_archive/smd auto-download inside main.py if missing, but smap/msl
+# (NASA) and iops have no auto-download and must already be in place, so fail
+# fast here instead of mid-run.
 missing=0
 
-if [ ! -d "dataset/NASA/train" ] || [ ! -d "dataset/NASA/test" ] || [ ! -f "dataset/NASA/labeled_anomalies.csv" ]; then
-  echo "[MISSING] dataset/NASA/ (needed for smap/msl) — run: unzip dataset/NASA.zip -d dataset/"
-  missing=1
-else
-  echo "[OK] dataset/NASA/ found (smap/msl)"
-fi
+case " $datasets " in
+  *" smap "*|*" msl "*)
+    if [ ! -d "dataset/NASA/train" ] || [ ! -d "dataset/NASA/test" ] || [ ! -f "dataset/NASA/labeled_anomalies.csv" ]; then
+      echo "[MISSING] dataset/NASA/ (needed for smap/msl) — run: unzip dataset/NASA.zip -d dataset/"
+      missing=1
+    else
+      echo "[OK] dataset/NASA/ found (smap/msl)"
+    fi
+    ;;
+esac
 
-if [ -z "$(ls -A dataset/IOPS/*.train.out 2>/dev/null)" ]; then
-  echo "[MISSING] dataset/IOPS/*.train.out (needed for iops) — extract the IOPS/ folder from TSB-UAD-Public.zip into dataset/IOPS/"
-  missing=1
-else
-  echo "[OK] dataset/IOPS/ found (iops)"
-fi
+case " $datasets " in
+  *" iops "*)
+    if [ -z "$(ls -A dataset/IOPS/*.train.out 2>/dev/null)" ]; then
+      echo "[MISSING] dataset/IOPS/*.train.out (needed for iops) — extract the IOPS/ folder from TSB-UAD-Public.zip into dataset/IOPS/"
+      missing=1
+    else
+      echo "[OK] dataset/IOPS/ found (iops)"
+    fi
+    ;;
+esac
 
-echo "[OK] anomaly_archive and smd auto-download on first run if missing (no pre-check needed)"
+case " $datasets " in
+  *" anomaly_archive "*|*" smd "*)
+    echo "[OK] anomaly_archive/smd auto-download on first run if missing (no pre-check needed)"
+    ;;
+esac
 
 if [ "$missing" -eq 1 ]; then
   echo "One or more required datasets are missing. Aborting before installing/training."
@@ -45,7 +63,7 @@ seed=0
 pilot_entities=3
 epoch=50
 
-for dataset in anomaly_archive iops smd smap msl
+for dataset in $datasets
 do
   echo "${dataset}"
   python main.py --gpu $gpu --dataset $dataset --seed $seed --pilot_entities $pilot_entities --epoch $epoch

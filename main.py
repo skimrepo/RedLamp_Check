@@ -283,59 +283,85 @@ def plot_tsne_embeddings(embeddings, class_idx, anomaly_dict, save_path, title=N
     plt.close(fig)
 
 
-def plot_example_window(Y_window, mask_window, title, save_path):
-    # Y_window/mask_window: (n_features, window_size)
+def plot_example_window(entity_Y, window_start, window_end, Y_window, Z_window, mask_window, header, save_path, context=100):
+    # entity_Y: (n_features, n_time) full original series, for surrounding context
+    # Y_window/Z_window/mask_window: (n_features, window_size)
     n_features, window_size = Y_window.shape
+    n_time = entity_Y.shape[1]
     affected = np.where(mask_window.sum(axis=1) < window_size)[0]
-    feature_idxs = affected[:3] if len(affected) > 0 else [0]
+    is_normal = len(affected) == 0
+    feature_idxs = affected[:3] if not is_normal else np.array([0])
 
-    fig, ax = plt.subplots(figsize=(8, 3), facecolor=SURFACE)
-    ax.set_facecolor(SURFACE)
-    for j, feat in enumerate(feature_idxs):
-        label = f'feature {feat}' if len(feature_idxs) > 1 else None
-        ax.plot(Y_window[feat], color=CHART_COLORS[j % len(CHART_COLORS)], linewidth=1.2, label=label)
+    ctx_start = max(0, window_start - context)
+    ctx_end = min(n_time, window_end + context)
+    x_ctx = np.arange(ctx_start, ctx_end)
+    x_win = np.arange(window_start, window_end)
 
-    if len(affected) > 0:
-        anomaly_idxs = np.where(mask_window[feature_idxs[0]] == 0)[0]
-        if len(anomaly_idxs) > 0:
-            ax.axvspan(anomaly_idxs.min(), anomaly_idxs.max() + 1, color='#e34948', alpha=0.15)
+    fig, axes = plt.subplots(len(feature_idxs), 1, figsize=(9, 2.3 * len(feature_idxs)), facecolor=SURFACE, sharex=True)
+    axes = np.atleast_1d(axes)
 
-    ax.set_title(title, color=INK, fontsize=10)
-    ax.tick_params(colors=MUTED, labelsize=7)
-    for spine in ax.spines.values():
-        spine.set_color(AXIS)
-    ax.grid(True, color=GRID, linewidth=0.5)
-    if len(feature_idxs) > 1:
-        legend = ax.legend(fontsize=7, frameon=False)
-        plt.setp(legend.get_texts(), color=INK2)
+    for row, feat in enumerate(feature_idxs):
+        ax = axes[row]
+        ax.set_facecolor(SURFACE)
+        # wider surrounding context from the untouched original series
+        ax.plot(x_ctx, entity_Y[feat, ctx_start:ctx_end], color=MUTED, linewidth=1.0, alpha=0.7,
+                label='context (original)' if row == 0 else None)
 
-    fig.tight_layout()
+        if is_normal:
+            ax.plot(x_win, Y_window[feat], color=CHART_COLORS[0], linewidth=1.4,
+                    label='window (no injection)' if row == 0 else None)
+        else:
+            # "before": Z = normal counterfactual (dashed); "after": Y = injected version (solid)
+            ax.plot(x_win, Z_window[feat], color=CHART_COLORS[1], linewidth=1.3, linestyle='--',
+                    label='before (Z, normal)' if row == 0 else None)
+            ax.plot(x_win, Y_window[feat], color=CHART_COLORS[5], linewidth=1.3,
+                    label='after (Y, injected)' if row == 0 else None)
+
+            anomaly_idxs = np.where(mask_window[feat] == 0)[0]
+            if len(anomaly_idxs) > 0:
+                ax.axvspan(window_start + anomaly_idxs.min(), window_start + anomaly_idxs.max() + 1,
+                           color='#e34948', alpha=0.15, label='injected region' if row == 0 else None)
+
+        ax.set_ylabel(f'feat {feat}', color=INK2, fontsize=8)
+        ax.tick_params(colors=MUTED, labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_color(AXIS)
+        ax.grid(True, color=GRID, linewidth=0.5)
+
+    if len(affected) > 3:
+        header += f'  (+{len(affected) - 3} more affected features not shown)'
+    fig.suptitle(header, color=INK, fontsize=9)
+    legend = axes[0].legend(fontsize=7, frameon=True, facecolor=SURFACE, edgecolor='none', framealpha=0.85, loc='upper right')
+    plt.setp(legend.get_texts(), color=INK2)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(save_path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
 
 
-def save_anomaly_type_examples(val_dataloader, anomaly_dict, save_dir, n_examples=3):
+def save_anomaly_type_examples(val_dataloader, save_dir, n_examples=3, seed=0, context=100):
     os.makedirs(save_dir, exist_ok=True)
-    inverse_dict = {v: k for k, v in anomaly_dict.items()}
+    rng = np.random.RandomState(seed)
+    window_size = val_dataloader.window_size
 
-    windows_by_class = {c: [] for c in anomaly_dict.values()}
-    masks_by_class = {c: [] for c in anomaly_dict.values()}
-    for batch in val_dataloader:
-        Y = batch['Y'].numpy()  # (batch, n_features, window)
-        mask = batch['anomaly_mask'].numpy()
-        labels = batch['label'].argmax(dim=1).numpy()
-        for i, c in enumerate(labels):
-            if len(windows_by_class[c]) < n_examples:
-                windows_by_class[c].append(Y[i])
-                masks_by_class[c].append(mask[i])
-        if all(len(w) >= n_examples for w in windows_by_class.values()):
-            break
+    entities = [e for e in val_dataloader.dataset.entities if e.Y.shape[1] >= window_size]
+    if not entities:
+        print(f'[skip] no entity in val split is >= window_size ({window_size}); skipping {save_dir}')
+        return
 
-    for c, windows in windows_by_class.items():
-        type_name = inverse_dict[c]
-        for i, (Y_window, mask_window) in enumerate(zip(windows, masks_by_class[c]), start=1):
-            save_path = f'{save_dir}/{type_name}_{i}.png'
-            plot_example_window(Y_window, mask_window, title=f'{type_name} (example {i})', save_path=save_path)
+    for anomaly_type in val_dataloader.anomaly_types:
+        for i in range(1, n_examples + 1):
+            entity = entities[rng.randint(len(entities))]
+            n_time = entity.Y.shape[1]
+            window_start = int(rng.randint(0, n_time - window_size + 1))
+            window_end = window_start + window_size
+
+            Y_window, Z_window, mask_window = val_dataloader.select_anomalies(anomaly_type, entity.Y, window_start, window_end)
+
+            header = f'{anomaly_type} (example {i}) — source: {entity.name}[{window_start}:{window_end}] (val split)'
+            save_path = f'{save_dir}/{anomaly_type}_{i}.png'
+            plot_example_window(entity.Y, window_start, window_end, Y_window, Z_window, mask_window,
+                                 header=header, save_path=save_path, context=context)
 
 
 def convolve_minmax_score(score, w=50, minmax=True):
@@ -590,7 +616,7 @@ if __name__ == '__main__':
         examples_save_dir = f'{model_dir}/ts_example_plots'
         if not os.path.isdir(examples_save_dir) or not os.listdir(examples_save_dir):
             print('Example anomaly-type plots')
-            save_anomaly_type_examples(val_dataloader, val_dataloader.anomaly_dict, examples_save_dir, n_examples=3)
+            save_anomaly_type_examples(val_dataloader, examples_save_dir, n_examples=3, seed=args.seed)
         else:
             print(examples_save_dir, 'exists')
 
