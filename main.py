@@ -6,6 +6,8 @@ import time
 import torch
 import torch.nn as nn
 
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
 
 from models.meta import ConvAEC
 import utils
@@ -211,6 +213,74 @@ def test(test_dataloader, model_dir, params, device):
         return inputs_list, prediction_list, anomaly_mask_list, label_list, pred_label_list, pred_enc_list
 
 
+def extract_embeddings(model_dir, params, device, val_dataloader, max_samples=2000):
+    model = ConvAEC(params).to(device)
+    model.load_state_dict(torch.load(f'{model_dir}/bestmodel.pkl'))
+    model.eval()
+
+    embeddings_list, class_idx_list = [], []
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inputs = batch['Y']
+            inputs = inputs.transpose(2, 1).to(device)  # (batch, window, n_features)
+            label = batch['label']
+
+            _, _, x_enc = model(inputs)
+            embeddings_list.append(x_enc.squeeze(-1).to('cpu').detach().numpy())
+            class_idx_list.append(label.argmax(dim=1).numpy())
+
+    embeddings = np.concatenate(embeddings_list, axis=0)
+    class_idx = np.concatenate(class_idx_list, axis=0)
+
+    if len(embeddings) > max_samples:
+        rng = np.random.RandomState(params.seed)
+        sample_idx = rng.choice(len(embeddings), max_samples, replace=False)
+        embeddings = embeddings[sample_idx]
+        class_idx = class_idx[sample_idx]
+
+    return embeddings, class_idx
+
+
+def plot_tsne_embeddings(embeddings, class_idx, anomaly_dict, save_path, title=None, perplexity=30, seed=0):
+    # Categorical palette (8 validated hues) extended to >8 classes via a secondary
+    # marker encoding, so identity is never carried by color alone beyond slot 8.
+    CHART_COLORS = ['#2a78d6', '#1baf7a', '#eda100', '#008300',
+                     '#4a3aa7', '#e34948', '#e87ba4', '#eb6834']
+    CHART_MARKERS = ['o', '^', 's', 'D']
+    SURFACE, GRID, AXIS, MUTED, INK, INK2 = '#fcfcfb', '#e1e0d9', '#c3c2b7', '#898781', '#0b0b0b', '#52514e'
+
+    n_samples = embeddings.shape[0]
+    eff_perplexity = max(5, min(perplexity, n_samples - 1))
+    reduced = TSNE(n_components=2, perplexity=eff_perplexity, random_state=seed, init='pca').fit_transform(embeddings)
+
+    inverse_dict = {v: k for k, v in anomaly_dict.items()}
+
+    fig, ax = plt.subplots(figsize=(7, 7), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    for class_value in sorted(inverse_dict.keys()):
+        mask = class_idx == class_value
+        if not mask.any():
+            continue
+        color = CHART_COLORS[class_value % len(CHART_COLORS)]
+        marker = CHART_MARKERS[min(class_value // len(CHART_COLORS), len(CHART_MARKERS) - 1)]
+        ax.scatter(reduced[mask, 0], reduced[mask, 1], s=16, c=color, marker=marker,
+                   alpha=0.85, edgecolors='none', label=inverse_dict[class_value])
+
+    ax.tick_params(colors=MUTED, labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color(AXIS)
+    ax.grid(True, color=GRID, linewidth=0.6)
+    if title:
+        ax.set_title(title, color=INK, fontsize=11)
+
+    legend = ax.legend(fontsize=8, markerscale=1.4, frameon=False, loc='center left', bbox_to_anchor=(1.02, 0.5))
+    plt.setp(legend.get_texts(), color=INK2)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def convolve_minmax_score(score, w=50, minmax=True):
     # Create the convolution kernel and reshape it for broadcasting
     b = np.ones((w, 1)) / w  # Shape it as (w, 1) to convolve along the time axis
@@ -311,6 +381,12 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0, help='The random seed')
     parser.add_argument('--run_name', type=str, default='test', help='The folder name used to save model, output and evaluation metrics. This can be set to any word')
 
+    # t-SNE embedding plot
+    parser.add_argument('--pilot_entities', type=int, default=0, help='If >0, only train/test the first N entities of the dataset (for quick pilot runs). 0 = use the full entity list')
+    parser.add_argument('--tsne_max_samples', type=int, default=2000, help='Max number of validation windows to subsample for the t-SNE embedding plot')
+    parser.add_argument('--tsne_perplexity', type=float, default=30, help='Perplexity passed to sklearn TSNE')
+    parser.add_argument('--skip_tsne', action='store_true', default=False, help='Skip generating the t-SNE embedding plot')
+
     args = parser.parse_args()
     print("Arguments:", str(args))
 
@@ -326,10 +402,7 @@ if __name__ == '__main__':
         args.batch_size = 128
         args.window_size = 100
         args.window_step = 1
-        #for all subdataset
         entity_list = [str(i).zfill(3) for i in range(1,251)]
-        #for convenience
-        entity_list = ['028']
     elif args.dataset == 'iops':
         args.n_features = 1
         min_features = 1
@@ -364,6 +437,8 @@ if __name__ == '__main__':
         args.window_step = 10
         entity_list = ['msl']
 
+    if args.pilot_entities > 0:
+        entity_list = entity_list[:args.pilot_entities]
 
     for entity in entity_list:
         if args.dataset == 'anomaly_archive':
@@ -443,6 +518,17 @@ if __name__ == '__main__':
             np.save(f'{test_save_dir}/pred_label.npy',test_pred_label)
             np.save(f'{test_save_dir}/enc.npy',test_pred_enc)
             np.save(f'{test_save_dir}/anomaly_score.npy',anomaly_score)
+
+
+        tsne_save_path = f'{model_dir}/tsne_embeddings.png'
+        if not args.skip_tsne and not os.path.isfile(tsne_save_path):
+            print('t-SNE embedding plot')
+            embeddings, class_idx = extract_embeddings(model_dir, params, device, val_dataloader, max_samples=args.tsne_max_samples)
+            plot_tsne_embeddings(embeddings, class_idx, val_dataloader.anomaly_dict, tsne_save_path,
+                                  title=f'{args.dataset} / {entity} (val, n={len(embeddings)})',
+                                  perplexity=args.tsne_perplexity, seed=args.seed)
+        elif os.path.isfile(tsne_save_path):
+            print(tsne_save_path, 'exists')
 
 
         if entity in ['smap','msl']:
