@@ -15,7 +15,9 @@ Reuses main.py's extract_embeddings/plot_tsne_embeddings directly so the
 per-entity tsne_embeddings.png. Does not modify main.py.
 """
 import argparse
+import glob
 import os
+import re
 import sys
 
 import numpy as np
@@ -31,11 +33,17 @@ import utils
 ANOMALY_TYPES = ['normal', 'spike', 'flip', 'speedup', 'noise', 'cutoff',
                  'average', 'scale', 'wander', 'contextual', 'upsidedown', 'mixture']
 
-# Add datasets here as needed; must match main.py's per-dataset branch exactly.
+# Only what's NOT recoverable from the result/ folder name goes here (n_features,
+# min/max_features aren't encoded in "d{downsampling}_b{batch}_w{window}_s{step}").
+# downsampling/batch_size/window_size/window_step are auto-discovered per entity
+# instead of hardcoded, because anomaly_archive's window_step varies per entity
+# (main.py picks 1/10/100 based on each series' own train_end) — hardcoding one
+# value here would silently point at the wrong result/ folder for some entities.
 DATASET_CONFIGS = {
-    'iops': dict(n_features=1, min_features=1, max_features=1, batch_size=128,
-                 window_size=100, window_step=10, downsampling=1),
+    'iops': dict(n_features=1, min_features=1, max_features=1),
+    'anomaly_archive': dict(n_features=1, min_features=1, max_features=1),
 }
+
 
 # Diagnostic-only palette: 8 shared hues from main.py + 4 more, so all 12
 # anomaly classes get a distinct color with marker free to encode data source.
@@ -43,11 +51,30 @@ EXT_COLORS = main.CHART_COLORS + ['#8b4513', '#20b2aa', '#6b8e23', '#2f4f4f']
 SOURCE_MARKERS = ['o', '^', 's', 'D', 'P', 'X']
 
 
-def build_model_args(cfg):
+def discover_entity(run_name, dataset, entity, seed):
+    """Find the actual trained model dir for this entity and parse its real
+    downsampling/batch_size/window_size/window_step straight from the folder
+    name, instead of assuming a fixed config."""
+    pattern = f'./result/{run_name}/{dataset}/{entity}/d*_b*_w*_s*/{seed}'
+    matches = [m for m in glob.glob(pattern) if os.path.isfile(os.path.join(m, 'bestmodel.pkl'))]
+    if len(matches) == 0:
+        raise FileNotFoundError(f'No trained model found for entity={entity!r} matching {pattern}')
+    if len(matches) > 1:
+        raise ValueError(f'Multiple candidate model dirs for entity={entity!r}: {matches} '
+                          f'— pass --entities explicitly or clean up result/')
+    model_dir = matches[0]
+    m = re.search(r'd(\d+)_b(\d+)_w(\d+)_s(\d+)', model_dir)
+    downsampling, batch_size, window_size, window_step = (int(x) for x in m.groups())
+    disk_cfg = dict(downsampling=downsampling, batch_size=batch_size,
+                     window_size=window_size, window_step=window_step)
+    return model_dir, disk_cfg
+
+
+def build_model_args(cfg, window_size):
     return utils.AttrDict(
         model='ConvAEC',
         n_features=cfg['n_features'],
-        window_size=cfg['window_size'],
+        window_size=window_size,
         embedding_dim=128,
         anomaly_types=ANOMALY_TYPES,
         c_loss_ratio=0.1,
@@ -56,25 +83,19 @@ def build_model_args(cfg):
     )
 
 
-def build_dataparams(dataset, entity, cfg):
+def build_dataparams(dataset, entity, cfg, disk_cfg):
     return utils.AttrDict(
         dataset=dataset,
         entities=entity,
-        downsampling=cfg['downsampling'],
-        batch_size=cfg['batch_size'],
-        window_size=cfg['window_size'],
-        window_step=cfg['window_step'],
+        downsampling=disk_cfg['downsampling'],
+        batch_size=disk_cfg['batch_size'],
+        window_size=disk_cfg['window_size'],
+        window_step=disk_cfg['window_step'],
         anomaly_types=ANOMALY_TYPES,
         min_range=1,
         min_features=cfg['min_features'],
         max_features=cfg['max_features'],
     )
-
-
-def model_dir_for(run_name, dataset, entity, cfg, seed):
-    data_dir = (f"{dataset}/{entity}/d{cfg['downsampling']}_b{cfg['batch_size']}"
-                f"_w{cfg['window_size']}_s{cfg['window_step']}")
-    return f'./result/{run_name}/{data_dir}/{seed}'
 
 
 def plot_tsne_multi_source(pooled_embeddings, pooled_class_idx, pooled_source_idx,
@@ -171,18 +192,29 @@ def run():
 
     device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seed)
 
-    model_args = build_model_args(cfg)
-    params = utils.AttrDict(seed=args_cli.seed)
-    params.override(main.model_parameters(model_args))
-
-    val_dataloaders = {}
     model_dirs = {}
+    disk_cfgs = {}
+    val_dataloaders = {}
     for entity in entities:
-        dataparams = build_dataparams(args_cli.dataset, entity, cfg)
+        model_dir, disk_cfg = discover_entity(args_cli.run_name, args_cli.dataset, entity, args_cli.seed)
+        model_dirs[entity] = model_dir
+        disk_cfgs[entity] = disk_cfg
+        dataparams = build_dataparams(args_cli.dataset, entity, cfg, disk_cfg)
         _, val_dl = datautils.load_dataloader_aug(dataparams, group='train')
         val_dataloaders[entity] = val_dl
-        model_dirs[entity] = model_dir_for(args_cli.run_name, args_cli.dataset, entity, cfg, args_cli.seed)
-        print(f'  {entity}: model_dir={model_dirs[entity]}, val windows={len(val_dl)}')
+        print(f'  {entity}: model_dir={model_dir}, disk_cfg={disk_cfg}, val windows={len(val_dl)}')
+
+    # All entities must share the same window_size/n_features to be architecturally
+    # cross-compatible (window_step/downsampling/batch_size can differ freely).
+    window_sizes = {disk_cfgs[e]['window_size'] for e in entities}
+    if len(window_sizes) > 1:
+        raise ValueError(f'Entities have mismatched window_size, cannot cross-infer: '
+                          f'{ {e: disk_cfgs[e]["window_size"] for e in entities} }')
+    window_size = window_sizes.pop()
+
+    model_args = build_model_args(cfg, window_size)
+    params = utils.AttrDict(seed=args_cli.seed)
+    params.override(main.model_parameters(model_args))
 
     anomaly_dict = val_dataloaders[entities[0]].anomaly_dict
 
