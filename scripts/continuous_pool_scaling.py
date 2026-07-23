@@ -60,19 +60,28 @@ def ucr_entities_excluding_holdout():
 
 
 def build_candidate_pool():
-    """Fixed deterministic order: SMD (616) then SMAP (54) then MSL (27) then
-    UCR (247), so candidates[:n] is always a strict prefix-subset of
-    candidates[:m] for n < m — a real, monotonic scaling curve."""
+    """Round-robin interleave across the 4 sources (one from SMD, one from
+    SMAP, one from MSL, one from UCR, repeat — skipping any source once it's
+    exhausted) instead of grouping all of SMD (616) first. Grouping would mean
+    n < 616 is 100% SMD-only, which defeats the point of a diverse scaling
+    pool. Interleaving keeps every prefix candidates[:n] a genuine mix of all
+    4 sources (until the smaller sources run out — MSL exhausts at n~108,
+    SMAP at n~189, UCR at n~575 — after which only SMD remains for the tail).
+    Still fully deterministic, so candidates[:n] is always a strict
+    prefix-subset of candidates[:m] for n < m."""
+    smd_candidates = [('smd', machine, col) for machine in SMD_MACHINES for col in SMD_CONTINUOUS_COLS]
+    smap_candidates = [('smap', channel, 0) for channel in smap_channel_ids()]
+    msl_candidates = [('msl', channel, 0) for channel in msl_channel_ids()]
+    ucr_candidates = [('ucr', entity, 0) for entity in ucr_entities_excluding_holdout()]
+
+    sources = [smd_candidates, smap_candidates, msl_candidates, ucr_candidates]
     candidates = []
-    for machine in SMD_MACHINES:
-        for col in SMD_CONTINUOUS_COLS:
-            candidates.append(('smd', machine, col))
-    for channel in smap_channel_ids():
-        candidates.append(('smap', channel, 0))
-    for channel in msl_channel_ids():
-        candidates.append(('msl', channel, 0))
-    for entity in ucr_entities_excluding_holdout():
-        candidates.append(('ucr', entity, 0))
+    idx = 0
+    while any(idx < len(source) for source in sources):
+        for source in sources:
+            if idx < len(source):
+                candidates.append(source[idx])
+        idx += 1
     return candidates
 
 
