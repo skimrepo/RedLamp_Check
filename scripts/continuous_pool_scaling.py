@@ -16,7 +16,7 @@ plot_tsne_multi_source/ANOMALY_TYPES) and domain_generalization.py
 Does not modify any existing file.
 """
 import argparse
-import csv
+import contextlib
 import json
 import os
 import sys
@@ -133,30 +133,68 @@ def wrap_loader(dataset_obj, batch_size, shuffle):
                        min_features=1, max_features=1, fast_sampling=False, shuffle=shuffle, verbose=True)
 
 
+class _Tee:
+    """Duplicates writes to multiple streams (e.g. real stdout + a per-stage
+    log file), flushing immediately so the file doesn't sit on a buffer."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+def summary_log_path(run_name, n_series):
+    return f'./result/{run_name}/_cross_domain_holdout/n{n_series}/train_summary.txt'
+
+
+def _append_log(log_path, line):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, 'a') as f:
+        f.write(line + '\n')
+
+
 def run_stage(candidates, n_series, run_name, seed, device, batch_size):
     selected = candidates[:n_series]
     train_entities, val_entities, dropped = assemble(selected)
     actual_n = len(train_entities)
     model_dir = f'./result/{run_name}/_pooled/continuous_n{n_series}/{seed}'
+    log_path = summary_log_path(run_name, n_series)
 
     if os.path.isfile(f'{model_dir}/bestmodel.pkl'):
-        print(f'[skip] {model_dir}/bestmodel.pkl exists — reusing (requested={n_series}, actual={actual_n}, dropped={dropped})')
+        msg = f'[skip] {model_dir}/bestmodel.pkl exists — reusing (requested={n_series}, actual={actual_n}, dropped={dropped})'
+        print(msg)
+        _append_log(log_path, msg)
         return model_dir, actual_n, dropped, None
 
     os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
     train_dl = wrap_loader(Dataset(entities=train_entities, name=f'n{n_series}-train'), batch_size, shuffle=True)
     val_dl = wrap_loader(Dataset(entities=val_entities, name=f'n{n_series}-val'), batch_size, shuffle=True)
-    print(f'n_series={n_series}: requested={n_series}, actual={actual_n}, dropped={dropped}, '
-          f'train windows={len(train_dl)}, val windows={len(val_dl)}')
 
-    model_args = ci.build_model_args(dg.CFG, WINDOW_SIZE)
-    params = utils.AttrDict(batch_size=batch_size, lr=0.001, epoch=100, max_grad_norm=1.0, seed=seed)
-    params.override(main.model_parameters(model_args))
+    # Redirect every print() during data-loading-report + training (including
+    # main.REDLAMP.train()'s own epoch-by-epoch prints) to BOTH real stdout
+    # and this stage's own train_summary.txt — so the full readable log for
+    # this stage survives independent of the combined console/tee log.
+    with open(log_path, 'a') as log_file:
+        with contextlib.redirect_stdout(_Tee(sys.stdout, log_file)):
+            print(f'n_series={n_series}: requested={n_series}, actual={actual_n}, dropped={dropped}, '
+                  f'train windows={len(train_dl)}, val windows={len(val_dl)}')
 
-    start = time.time()
-    main.REDLAMP(model_dir=model_dir, params=params, device=device).train(train_dl, val_dl)
-    elapsed = time.time() - start
-    print(f'n_series={n_series}: training took {elapsed:.1f}s')
+            model_args = ci.build_model_args(dg.CFG, WINDOW_SIZE)
+            params = utils.AttrDict(batch_size=batch_size, lr=0.001, epoch=100, max_grad_norm=1.0, seed=seed)
+            params.override(main.model_parameters(model_args))
+
+            start = time.time()
+            main.REDLAMP(model_dir=model_dir, params=params, device=device).train(train_dl, val_dl)
+            elapsed = time.time() - start
+            print(f'n_series={n_series}: training took {elapsed:.1f}s')
+
     return model_dir, actual_n, dropped, elapsed
 
 
@@ -208,8 +246,10 @@ def evaluate_stage(model_dir, n_series, actual_n, dropped, elapsed, holdout_val_
     with open(f'{out_dir}/stage_summary.json', 'w') as f:
         json.dump(summary, f, indent=2)
 
-    print(f'n_series={n_series}: mean holdout accuracy={summary["mean_accuracy"]:.4f} '
-          f'(actual_n={actual_n}, dropped={dropped}, train_seconds={elapsed})')
+    final_line = (f'n_series={n_series}: mean holdout accuracy={summary["mean_accuracy"]:.4f} '
+                  f'(actual_n={actual_n}, dropped={dropped}, train_seconds={elapsed})')
+    print(final_line)
+    _append_log(summary_log_path(args_cli.run_name, n_series), final_line)
 
 
 def run():
