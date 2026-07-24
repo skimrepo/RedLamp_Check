@@ -159,6 +159,20 @@ def _append_log(log_path, line):
         f.write(line + '\n')
 
 
+def _previous_train_seconds(run_name, n_series):
+    """When a stage's bestmodel.pkl already exists and training is skipped,
+    preserve whatever train_seconds an earlier full run already recorded in
+    stage_summary.json, instead of clobbering it with null on re-evaluation."""
+    summary_path = f'./result/{run_name}/_cross_domain_holdout/n{n_series}/stage_summary.json'
+    if os.path.isfile(summary_path):
+        try:
+            with open(summary_path) as f:
+                return json.load(f).get('train_seconds')
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
 def run_stage(candidates, n_series, run_name, seed, device, batch_size):
     selected = candidates[:n_series]
     train_entities, val_entities, dropped = assemble(selected)
@@ -170,7 +184,7 @@ def run_stage(candidates, n_series, run_name, seed, device, batch_size):
         msg = f'[skip] {model_dir}/bestmodel.pkl exists — reusing (requested={n_series}, actual={actual_n}, dropped={dropped})'
         print(msg)
         _append_log(log_path, msg)
-        return model_dir, actual_n, dropped, None
+        return model_dir, actual_n, dropped, _previous_train_seconds(run_name, n_series)
 
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
