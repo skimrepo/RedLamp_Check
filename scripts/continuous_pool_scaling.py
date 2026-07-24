@@ -173,14 +173,14 @@ def _previous_train_seconds(run_name, n_series):
     return None
 
 
-def run_stage(candidates, n_series, run_name, seed, device, batch_size):
+def run_stage(candidates, n_series, run_name, seed, device, batch_size, force=False):
     selected = candidates[:n_series]
     train_entities, val_entities, dropped = assemble(selected)
     actual_n = len(train_entities)
     model_dir = f'./result/{run_name}/_pooled/continuous_n{n_series}/{seed}'
     log_path = summary_log_path(run_name, n_series)
 
-    if os.path.isfile(f'{model_dir}/bestmodel.pkl'):
+    if os.path.isfile(f'{model_dir}/bestmodel.pkl') and not force:
         msg = f'[skip] {model_dir}/bestmodel.pkl exists — reusing (requested={n_series}, actual={actual_n}, dropped={dropped})'
         print(msg)
         _append_log(log_path, msg)
@@ -195,8 +195,14 @@ def run_stage(candidates, n_series, run_name, seed, device, batch_size):
     # main.REDLAMP.train()'s own epoch-by-epoch prints) to BOTH real stdout
     # and this stage's own train_summary.txt — so the full readable log for
     # this stage survives independent of the combined console/tee log.
-    with open(log_path, 'a') as log_file:
+    # Forced retrains start the log fresh ('w') instead of appending after
+    # whatever an earlier attempt already wrote, so the file isn't a confusing
+    # mix of an old and new training run.
+    log_mode = 'w' if force else 'a'
+    with open(log_path, log_mode) as log_file:
         with contextlib.redirect_stdout(_Tee(sys.stdout, log_file)):
+            if force and os.path.isfile(f'{model_dir}/bestmodel.pkl'):
+                print(f'[force] retraining n_series={n_series} — bestmodel.pkl already existed and will be overwritten')
             print(f'n_series={n_series}: requested={n_series}, actual={actual_n}, dropped={dropped}, '
                   f'train windows={len(train_dl)}, val windows={len(val_dl)}')
 
@@ -272,6 +278,8 @@ def run():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--n_series', type=int, nargs='+', default=[50, 100, 200, 400, 800, 944])
+    parser.add_argument('--force_min_n', type=int, default=None,
+                         help='Retrain any stage with n_series >= this value even if its bestmodel.pkl already exists')
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--tsne_max_samples', type=int, default=2000)
     parser.add_argument('--tsne_perplexity', type=float, default=30)
@@ -295,8 +303,9 @@ def run():
 
     for n_series in args_cli.n_series:
         print(f'=== Stage n_series={n_series} ===')
+        force = args_cli.force_min_n is not None and n_series >= args_cli.force_min_n
         model_dir, actual_n, dropped, elapsed = run_stage(
-            candidates, n_series, args_cli.run_name, args_cli.seed, device, args_cli.batch_size)
+            candidates, n_series, args_cli.run_name, args_cli.seed, device, args_cli.batch_size, force=force)
         evaluate_stage(model_dir, n_series, actual_n, dropped, elapsed,
                        holdout_val_dls, anomaly_dict, device, args_cli)
 
