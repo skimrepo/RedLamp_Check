@@ -59,7 +59,7 @@ def ucr_entities_excluding_holdout():
     return [str(i).zfill(3) for i in range(1, 251) if str(i).zfill(3) not in UCR_HOLDOUT]
 
 
-def build_candidate_pool():
+def build_candidate_pool(exclude_sources=()):
     """Round-robin interleave across the 4 sources (one from SMD, one from
     SMAP, one from MSL, one from UCR, repeat — skipping any source once it's
     exhausted) instead of grouping all of SMD (616) first. Grouping would mean
@@ -68,13 +68,19 @@ def build_candidate_pool():
     4 sources (until the smaller sources run out — MSL exhausts at n~108,
     SMAP at n~189, UCR at n~575 — after which only SMD remains for the tail).
     Still fully deterministic, so candidates[:n] is always a strict
-    prefix-subset of candidates[:m] for n < m."""
-    smd_candidates = [('smd', machine, col) for machine in SMD_MACHINES for col in SMD_CONTINUOUS_COLS]
-    smap_candidates = [('smap', channel, 0) for channel in smap_channel_ids()]
-    msl_candidates = [('msl', channel, 0) for channel in msl_channel_ids()]
-    ucr_candidates = [('ucr', entity, 0) for entity in ucr_entities_excluding_holdout()]
+    prefix-subset of candidates[:m] for n < m.
 
-    sources = [smd_candidates, smap_candidates, msl_candidates, ucr_candidates]
+    exclude_sources: iterable of source tags ('smd'/'smap'/'msl'/'ucr') to
+    drop entirely before interleaving — e.g. to build a pool that has never
+    seen a whole domain at all (not just a few held-out entities from it)."""
+    all_sources = {
+        'smd': [('smd', machine, col) for machine in SMD_MACHINES for col in SMD_CONTINUOUS_COLS],
+        'smap': [('smap', channel, 0) for channel in smap_channel_ids()],
+        'msl': [('msl', channel, 0) for channel in msl_channel_ids()],
+        'ucr': [('ucr', entity, 0) for entity in ucr_entities_excluding_holdout()],
+    }
+    sources = [candidates for tag, candidates in all_sources.items() if tag not in exclude_sources]
+
     candidates = []
     idx = 0
     while any(idx < len(source) for source in sources):
@@ -83,6 +89,12 @@ def build_candidate_pool():
                 candidates.append(source[idx])
         idx += 1
     return candidates
+
+
+def pool_suffix(exclude_sources):
+    if not exclude_sources:
+        return ''
+    return '_excl_' + '_'.join(sorted(exclude_sources))
 
 
 def load_cached(cache, source_tag, entity_id):
@@ -149,8 +161,8 @@ class _Tee:
             s.flush()
 
 
-def summary_log_path(run_name, n_series):
-    return f'./result/{run_name}/_cross_domain_holdout/n{n_series}/train_summary.txt'
+def summary_log_path(run_name, n_series, exclude_sources=()):
+    return f'./result/{run_name}/_cross_domain_holdout/n{n_series}{pool_suffix(exclude_sources)}/train_summary.txt'
 
 
 def _append_log(log_path, line):
@@ -159,11 +171,11 @@ def _append_log(log_path, line):
         f.write(line + '\n')
 
 
-def _previous_train_seconds(run_name, n_series):
+def _previous_train_seconds(run_name, n_series, exclude_sources=()):
     """When a stage's bestmodel.pkl already exists and training is skipped,
     preserve whatever train_seconds an earlier full run already recorded in
     stage_summary.json, instead of clobbering it with null on re-evaluation."""
-    summary_path = f'./result/{run_name}/_cross_domain_holdout/n{n_series}/stage_summary.json'
+    summary_path = f'./result/{run_name}/_cross_domain_holdout/n{n_series}{pool_suffix(exclude_sources)}/stage_summary.json'
     if os.path.isfile(summary_path):
         try:
             with open(summary_path) as f:
@@ -173,18 +185,18 @@ def _previous_train_seconds(run_name, n_series):
     return None
 
 
-def run_stage(candidates, n_series, run_name, seed, device, batch_size, force=False):
+def run_stage(candidates, n_series, run_name, seed, device, batch_size, force=False, exclude_sources=()):
     selected = candidates[:n_series]
     train_entities, val_entities, dropped = assemble(selected)
     actual_n = len(train_entities)
-    model_dir = f'./result/{run_name}/_pooled/continuous_n{n_series}/{seed}'
-    log_path = summary_log_path(run_name, n_series)
+    model_dir = f'./result/{run_name}/_pooled/continuous_n{n_series}{pool_suffix(exclude_sources)}/{seed}'
+    log_path = summary_log_path(run_name, n_series, exclude_sources)
 
     if os.path.isfile(f'{model_dir}/bestmodel.pkl') and not force:
         msg = f'[skip] {model_dir}/bestmodel.pkl exists — reusing (requested={n_series}, actual={actual_n}, dropped={dropped})'
         print(msg)
         _append_log(log_path, msg)
-        return model_dir, actual_n, dropped, _previous_train_seconds(run_name, n_series)
+        return model_dir, actual_n, dropped, _previous_train_seconds(run_name, n_series, exclude_sources)
 
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -218,9 +230,9 @@ def run_stage(candidates, n_series, run_name, seed, device, batch_size, force=Fa
     return model_dir, actual_n, dropped, elapsed
 
 
-def evaluate_stage(model_dir, n_series, actual_n, dropped, elapsed, holdout_val_dls, anomaly_dict, device, args_cli):
-    tag = f'continuous_n{n_series}'
-    out_dir = f'./result/{args_cli.run_name}/_cross_domain_holdout/n{n_series}'
+def evaluate_stage(model_dir, n_series, actual_n, dropped, elapsed, holdout_val_dls, anomaly_dict, device, args_cli, exclude_sources=()):
+    tag = f'continuous_n{n_series}{pool_suffix(exclude_sources)}'
+    out_dir = f'./result/{args_cli.run_name}/_cross_domain_holdout/n{n_series}{pool_suffix(exclude_sources)}'
     plots_dir = f'{out_dir}/plots'
     os.makedirs(plots_dir, exist_ok=True)
 
@@ -269,7 +281,7 @@ def evaluate_stage(model_dir, n_series, actual_n, dropped, elapsed, holdout_val_
     final_line = (f'n_series={n_series}: mean holdout accuracy={summary["mean_accuracy"]:.4f} '
                   f'(actual_n={actual_n}, dropped={dropped}, train_seconds={elapsed})')
     print(final_line)
-    _append_log(summary_log_path(args_cli.run_name, n_series), final_line)
+    _append_log(summary_log_path(args_cli.run_name, n_series, exclude_sources), final_line)
 
 
 def run():
@@ -280,6 +292,9 @@ def run():
     parser.add_argument('--n_series', type=int, nargs='+', default=[50, 100, 200, 400, 800, 944])
     parser.add_argument('--force_min_n', type=int, default=None,
                          help='Retrain any stage with n_series >= this value even if its bestmodel.pkl already exists')
+    parser.add_argument('--exclude_sources', nargs='*', default=[], choices=['smd', 'smap', 'msl', 'ucr'],
+                         help="Drop these sources entirely from the candidate pool (e.g. --exclude_sources ucr "
+                              "for a pool that has never seen ANY UCR entity, not just the 3 held-out ones)")
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--tsne_max_samples', type=int, default=2000)
     parser.add_argument('--tsne_perplexity', type=float, default=30)
@@ -288,8 +303,9 @@ def run():
     device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seed)
 
     print('Building candidate pool...')
-    candidates = build_candidate_pool()
-    print(f'Total candidate pool size: {len(candidates)}')
+    candidates = build_candidate_pool(exclude_sources=args_cli.exclude_sources)
+    print(f'Total candidate pool size: {len(candidates)}'
+          + (f' (excluding: {args_cli.exclude_sources})' if args_cli.exclude_sources else ''))
 
     print('Resolving the 6 holdout entities (kpi_1..3, ucr_1..3)...')
     holdout_val_dls = {}
@@ -302,12 +318,13 @@ def run():
     anomaly_dict = holdout_val_dls[dg.DATA_ALIASES[0]].anomaly_dict
 
     for n_series in args_cli.n_series:
-        print(f'=== Stage n_series={n_series} ===')
+        print(f'=== Stage n_series={n_series}{pool_suffix(args_cli.exclude_sources)} ===')
         force = args_cli.force_min_n is not None and n_series >= args_cli.force_min_n
         model_dir, actual_n, dropped, elapsed = run_stage(
-            candidates, n_series, args_cli.run_name, args_cli.seed, device, args_cli.batch_size, force=force)
+            candidates, n_series, args_cli.run_name, args_cli.seed, device, args_cli.batch_size,
+            force=force, exclude_sources=args_cli.exclude_sources)
         evaluate_stage(model_dir, n_series, actual_n, dropped, elapsed,
-                       holdout_val_dls, anomaly_dict, device, args_cli)
+                       holdout_val_dls, anomaly_dict, device, args_cli, exclude_sources=args_cli.exclude_sources)
 
     print('Done.')
 
