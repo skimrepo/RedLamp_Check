@@ -125,6 +125,9 @@ def run():
     rows = []
 
     def add_row(model_alias, data_alias, model_dir):
+        if not os.path.isfile(f'{model_dir}/bestmodel.pkl'):
+            print(f'[skip] {model_dir}/bestmodel.pkl does not exist yet — model={model_alias} data={data_alias}')
+            return
         info = data_info[data_alias]
         print(f'Scoring model={model_alias} data={data_alias}...')
         metrics, peak_in_range = score_pair(model_dir, params, device, info['test_dl'], info['real_labels'])
@@ -132,6 +135,11 @@ def run():
         row['peak_in_range'] = peak_in_range if info['is_ucr'] else ''
         rows.append(row)
         print(f'  -> {metrics}')
+        # Write after every row, not just at the end — so a run started before
+        # every model exists yet (e.g. before the UCR-free pool finishes
+        # training) still saves everything computed so far instead of losing
+        # it all if a later row's model is missing.
+        pd.DataFrame(rows).to_csv(out_csv, index=False)
 
     # 6 self-baselines: each entity's own dedicated model on its own test set.
     for alias, info in data_info.items():
@@ -149,9 +157,7 @@ def run():
     for alias in dg.DATA_ALIASES:
         add_row(f'continuous_n{NO_UCR_N}_excl_ucr', alias, no_ucr_model_dir)
 
-    df = pd.DataFrame(rows)
-    df.to_csv(out_csv, index=False)
-    print('Done. Wrote', out_csv)
+    print(f'Done. Wrote {len(rows)}/39 rows to {out_csv}')
 
 
 if __name__ == '__main__':
