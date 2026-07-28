@@ -126,6 +126,9 @@ def run():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--out_csv', default=None)
+    parser.add_argument('--force', action='store_true',
+                         help='Recompute every entity even if already present in out_csv (default: resume, '
+                              'skipping entities already scored in a prior run).')
     args_cli = parser.parse_args()
 
     device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seed)
@@ -138,10 +141,19 @@ def run():
     params.override(main.model_parameters(model_args))
 
     rows = []
+    already_done = set()
+    if not args_cli.force and os.path.isfile(out_csv):
+        prior = pd.read_csv(out_csv)
+        rows = prior.to_dict('records')
+        already_done = set(zip(prior['dataset'], prior['entity']))
+        print(f'Resuming from {out_csv}: {len(already_done)} entities already scored, skipping those.')
+
     for dataset in ['anomaly_archive', 'iops']:
         entities = discover_dataset_entities(args_cli.run_name, dataset)
         print(f'{dataset}: found {len(entities)} entity directories')
         for real_name in entities:
+            if (dataset, real_name) in already_done:
+                continue
             result = score_entity(args_cli.run_name, dataset, real_name, args_cli.seed, params, device)
             if result is None:
                 print(f'[skip] {dataset}/{real_name}: no bestmodel.pkl yet or scoring failed')
