@@ -37,6 +37,15 @@ from TSB_UAD.vus.metrics import get_metrics
 
 METRIC_KEYS = ['VUS_ROC', 'VUS_PR', 'R_AUC_ROC', 'R_AUC_PR', 'RF']
 
+# RedLamp row values reported in the paper (arXiv:2505.20765), averaged over
+# all subdatasets of each domain: VUS_ROC/VUS_PR/RF from Table 3, R_AUC_ROC/
+# R_AUC_PR from Table 5. No paper-reported number exists for peak_in_range
+# (the UCR-only accuracy from Section 4.1.3), so it is not compared here.
+PAPER_REFERENCE = {
+    'anomaly_archive': {'VUS_ROC': 0.897, 'VUS_PR': 0.492, 'RF': 0.234, 'R_AUC_ROC': 0.902, 'R_AUC_PR': 0.517},
+    'iops':            {'VUS_ROC': 0.911, 'VUS_PR': 0.448, 'RF': 0.235, 'R_AUC_ROC': 0.940, 'R_AUC_PR': 0.636},
+}
+
 
 def discover_dataset_entities(run_name, dataset):
     base = f'./result/{run_name}/{dataset}'
@@ -101,6 +110,16 @@ def score_entity(run_name, dataset, real_name, seed, params, device):
     return dict(metrics=metrics, peak_in_range=peak_in_range)
 
 
+def build_comparison(summary):
+    comparison_rows = []
+    for dataset in summary.index:
+        for metric in METRIC_KEYS:
+            ours = summary.loc[dataset, metric]
+            paper = PAPER_REFERENCE[dataset][metric]
+            comparison_rows.append(dict(dataset=dataset, metric=metric, ours=ours, paper=paper, delta=ours - paper))
+    return pd.DataFrame(comparison_rows)
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
@@ -112,6 +131,7 @@ def run():
     device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seed)
     out_csv = args_cli.out_csv or f'./result/{args_cli.run_name}/full_reproduction_metrics.csv'
     summary_csv = out_csv.replace('.csv', '_summary.csv')
+    comparison_csv = out_csv.replace('.csv', '_vs_paper.csv')
 
     model_args = ci.build_model_args(dg.CFG, cps.WINDOW_SIZE)
     params = utils.AttrDict(seed=args_cli.seed)
@@ -136,13 +156,15 @@ def run():
             summary = df.groupby('dataset')[METRIC_KEYS].mean()
             summary['n_entities'] = df.groupby('dataset').size()
             summary.to_csv(summary_csv)
+            build_comparison(summary).to_csv(comparison_csv, index=False)
 
     if rows:
         df = pd.DataFrame(rows)
         summary = df.groupby('dataset')[METRIC_KEYS].mean()
         summary['n_entities'] = df.groupby('dataset').size()
         print(summary)
-    print(f'Done. {len(rows)} entities scored. Wrote {out_csv} and {summary_csv}')
+        print(build_comparison(summary).to_string(index=False))
+    print(f'Done. {len(rows)} entities scored. Wrote {out_csv}, {summary_csv}, and {comparison_csv}')
 
 
 if __name__ == '__main__':
