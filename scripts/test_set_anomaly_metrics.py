@@ -83,15 +83,19 @@ def score_pair(model_dir, params, device, test_dl, real_labels):
         raise ValueError(f'length mismatch for {model_dir}: aligned score={len(score)} vs '
                           f'real labels={len(real_labels)} — do not silently truncate, investigate')
 
+    anomaly_idxs = np.where(real_labels == 1)[0]
+    if len(anomaly_idxs) == 0:
+        # TSB-UAD's range-based metrics assume at least one anomaly region and
+        # crash (IndexError) on an all-normal test split — not expected among
+        # these 6 hand-picked entities, but guarded here for consistency with
+        # full_reproduction_metrics.py, which hits this on some UCR entities.
+        return None, None
+
     all_metrics = get_metrics(score, real_labels, metric='all', slidingWindow=window_size)
     metrics = {k: all_metrics[k] for k in METRIC_KEYS}
 
-    anomaly_idxs = np.where(real_labels == 1)[0]
-    if len(anomaly_idxs) > 0:
-        peak_idx = int(np.argmax(score))
-        peak_in_range = int(anomaly_idxs.min() <= peak_idx <= anomaly_idxs.max())
-    else:
-        peak_in_range = None
+    peak_idx = int(np.argmax(score))
+    peak_in_range = int(anomaly_idxs.min() <= peak_idx <= anomaly_idxs.max())
     return metrics, peak_in_range
 
 
@@ -131,6 +135,9 @@ def run():
         info = data_info[data_alias]
         print(f'Scoring model={model_alias} data={data_alias}...')
         metrics, peak_in_range = score_pair(model_dir, params, device, info['test_dl'], info['real_labels'])
+        if metrics is None:
+            print(f'[skip] {data_alias}: no real anomaly in test labels (range metrics undefined)')
+            return
         row = dict(model=model_alias, data=data_alias, **metrics)
         row['peak_in_range'] = peak_in_range if info['is_ucr'] else ''
         rows.append(row)

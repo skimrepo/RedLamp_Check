@@ -78,6 +78,16 @@ def score_entity(run_name, dataset, real_name, seed, params, device):
               f'aligned score={len(score)} vs real labels={len(real_labels)}')
         return None
 
+    if real_labels.sum() == 0:
+        # A handful of UCR subdatasets have anomaly_start == anomaly_end (a
+        # zero-length window, i.e. no real anomaly in the test split at all).
+        # TSB-UAD's range-based metrics assume at least one anomaly region and
+        # crash on an empty one (IndexError in RangeAUC_volume_opt), so these
+        # entities are excluded from the average rather than the whole run
+        # dying on them.
+        print(f'[skip] {dataset}/{real_name}: no real anomaly in test labels (range metrics undefined)')
+        return None
+
     all_metrics = get_metrics(score, real_labels, metric='all', slidingWindow=window_size)
     metrics = {k: all_metrics[k] for k in METRIC_KEYS}
 
