@@ -467,6 +467,8 @@ if __name__ == '__main__':
 
     # t-SNE embedding plot
     parser.add_argument('--pilot_entities', type=int, default=0, help='If >0, only train/test the first N entities of the dataset (for quick pilot runs). 0 = use the full entity list')
+    parser.add_argument('--entity_start', type=int, default=0, help='Slice entity_list[entity_start:entity_end] (for splitting a dataset into concurrent chunks). 0 = start from the beginning')
+    parser.add_argument('--entity_end', type=int, default=None, help='Slice entity_list[entity_start:entity_end]. None = through the end of the list')
     parser.add_argument('--tsne_max_samples', type=int, default=2000, help='Max number of validation windows to subsample for the t-SNE embedding plot')
     parser.add_argument('--tsne_perplexity', type=float, default=30, help='Perplexity passed to sklearn TSNE')
     parser.add_argument('--skip_tsne', action='store_true', default=False, help='Skip generating the t-SNE embedding plot')
@@ -523,6 +525,9 @@ if __name__ == '__main__':
 
     if args.pilot_entities > 0:
         entity_list = entity_list[:args.pilot_entities]
+
+    if args.entity_start > 0 or args.entity_end is not None:
+        entity_list = entity_list[args.entity_start:args.entity_end]
 
     for entity in entity_list:
         if args.dataset == 'anomaly_archive':
