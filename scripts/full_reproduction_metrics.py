@@ -4,13 +4,20 @@ test_set_anomaly_metrics.py (VUS_ROC, VUS_PR, R_AUC_ROC, R_AUC_PR, RF), plus
 UCR's peak-in-range accuracy, but scored for EVERY dedicated per-entity model
 under anomaly_archive (up to 250) and iops (up to 29) — not just the 3+3
 holdout aliases — then averaged per dataset. This is what's directly
-comparable to the paper's own Table 3 RedLamp row (UCR / AIOps), since the
-paper's numbers are themselves an average over all subdatasets.
+comparable to the paper's own Table 3 RedLamp row (UCR / AIOps).
 
-Robust to partial training: entities without a bestmodel.pkl yet (main.py's
-run over the full entity_list is still in progress) are skipped, not errored,
-and the CSV + summary are rewritten after every entity — so this can be run
-repeatedly while training is still ongoing to check progress so far.
+Matches the paper's own methodology (Section 4.1.1): "we trained and tested
+separately for each of the subdatasets, and present the average results of
+five runs." So each entity is scored under multiple random seeds (default
+0-4 via --seeds; main.py already keys each entity's model_dir on --seed, so
+training additional seeds needs no code change, just rerunning main.py with
+--seed 1/2/3/4). The average is taken in the same two levels as the paper:
+first across seeds within an entity, then across entities within a dataset.
+
+Robust to partial training: any (entity, seed) pair without a bestmodel.pkl
+yet is skipped, not errored, and every output file is rewritten after every
+newly-scored (entity, seed) pair — so this can be run repeatedly while
+training/scoring is still ongoing to check progress so far.
 
 Does not modify main.py, cross_inference.py, domain_generalization.py, or
 continuous_pool_scaling.py — only imports from them.
@@ -72,7 +79,10 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
     self-model (ci.discover_entity); pass model_dir to score against a fixed
     external model instead (used by full_cross_domain_metrics.py to score a
     domain-excluded pooled model against every entity, without retraining)."""
-    own_model_dir, disk_cfg = ci.discover_entity(run_name, dataset, real_name, seed)
+    try:
+        own_model_dir, disk_cfg = ci.discover_entity(run_name, dataset, real_name, seed)
+    except FileNotFoundError:
+        return None
     if model_dir is None:
         model_dir = own_model_dir
     if not os.path.isfile(f'{model_dir}/bestmodel.pkl'):
@@ -106,7 +116,7 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
     all_metrics = get_metrics(score, real_labels, metric='all', slidingWindow=window_size)
     metrics = {k: all_metrics[k] for k in METRIC_KEYS}
 
-    peak_in_range = ''
+    peak_in_range = np.nan
     if dataset == 'anomaly_archive':
         anomaly_idxs = np.where(real_labels == 1)[0]
         if len(anomaly_idxs) > 0:
@@ -126,63 +136,105 @@ def build_comparison(summary):
     return pd.DataFrame(comparison_rows)
 
 
+def aggregate(raw_rows):
+    """Two-level average matching the paper: mean across seeds within an
+    entity first (entity_df), then mean across entities within a dataset
+    (summary). Returns (entity_df, summary) or (None, None) if raw_rows is
+    empty."""
+    if not raw_rows:
+        return None, None
+    raw_df = pd.DataFrame(raw_rows)
+
+    entity_df = raw_df.groupby(['dataset', 'entity'], as_index=False).agg(
+        **{k: (k, 'mean') for k in METRIC_KEYS},
+        peak_in_range=('peak_in_range', 'mean'),
+        n_seeds=('seed', 'nunique'),
+    )
+
+    summary = entity_df.groupby('dataset')[METRIC_KEYS].mean()
+    summary['n_entities'] = entity_df.groupby('dataset').size()
+    summary['avg_seeds_per_entity'] = entity_df.groupby('dataset')['n_seeds'].mean()
+    return entity_df, summary
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2, 3, 4],
+                         help='Seeds to average over per entity, matching the paper\'s "average results of '
+                              'five runs" (Section 4.1.1). Each seed needs its own main.py --seed N training run '
+                              'first; seeds not yet trained for a given entity are skipped, not errored.')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--out_csv', default=None)
     parser.add_argument('--force', action='store_true',
-                         help='Recompute every entity even if already present in out_csv (default: resume, '
-                              'skipping entities already scored in a prior run).')
+                         help='Recompute every (entity, seed) pair even if already present in the raw CSV '
+                              '(default: resume, skipping pairs already scored in a prior run).')
     args_cli = parser.parse_args()
 
-    device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seed)
+    device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seeds[0])
     out_csv = args_cli.out_csv or f'./result/{args_cli.run_name}/full_reproduction_metrics.csv'
+    raw_csv = out_csv.replace('.csv', '_raw.csv')
     summary_csv = out_csv.replace('.csv', '_summary.csv')
     comparison_csv = out_csv.replace('.csv', '_vs_paper.csv')
 
+    # Architecture hyperparams only — params.seed itself is never read during
+    # inference (main.test() just loads bestmodel.pkl and runs model.eval()),
+    # so one shared params object is reused across every seed's checkpoint.
     model_args = ci.build_model_args(dg.CFG, cps.WINDOW_SIZE)
-    params = utils.AttrDict(seed=args_cli.seed)
+    params = utils.AttrDict(seed=args_cli.seeds[0])
     params.override(main.model_parameters(model_args))
 
     rows = []
     already_done = set()
-    if not args_cli.force and os.path.isfile(out_csv):
-        prior = pd.read_csv(out_csv)
+    if not args_cli.force and os.path.isfile(raw_csv):
+        prior = pd.read_csv(raw_csv)
         rows = prior.to_dict('records')
-        already_done = set(zip(prior['dataset'], prior['entity']))
-        print(f'Resuming from {out_csv}: {len(already_done)} entities already scored, skipping those.')
+        already_done = set(zip(prior['dataset'], prior['entity'], prior['seed']))
+        print(f'Resuming from {raw_csv}: {len(already_done)} (entity, seed) pairs already scored, skipping those.')
+    elif not args_cli.force and os.path.isfile(out_csv):
+        # One-time migration from the pre-multi-seed CSV (one row per entity,
+        # no 'seed' column, implicitly seed=0) into the new raw cache — avoids
+        # redundantly re-running inference for seed=0 results that already exist.
+        old = pd.read_csv(out_csv)
+        if 'seed' not in old.columns:
+            old['seed'] = 0
+            rows = old.to_dict('records')
+            already_done = set(zip(old['dataset'], old['entity'], old['seed']))
+            print(f'Migrated {len(already_done)} pre-existing seed=0 results from {out_csv} into the raw cache.')
+
+    def save_all():
+        pd.DataFrame(rows).to_csv(raw_csv, index=False)
+        entity_df, summary = aggregate(rows)
+        if entity_df is None:
+            return None
+        entity_df.to_csv(out_csv, index=False)
+        summary.to_csv(summary_csv)
+        build_comparison(summary).to_csv(comparison_csv, index=False)
+        return summary
 
     for dataset in ['anomaly_archive', 'iops']:
         entities = discover_dataset_entities(args_cli.run_name, dataset)
-        print(f'{dataset}: found {len(entities)} entity directories')
+        print(f'{dataset}: found {len(entities)} entity directories, seeds={args_cli.seeds}')
         for real_name in entities:
-            if (dataset, real_name) in already_done:
-                continue
-            result = score_entity(args_cli.run_name, dataset, real_name, args_cli.seed, params, device)
-            if result is None:
-                print(f'[skip] {dataset}/{real_name}: no bestmodel.pkl yet or scoring failed')
-                continue
-            row = dict(dataset=dataset, entity=real_name, **result['metrics'])
-            row['peak_in_range'] = result['peak_in_range']
-            rows.append(row)
-            print(f'  {dataset}/{real_name}: {result["metrics"]}')
+            for seed in args_cli.seeds:
+                if (dataset, real_name, seed) in already_done:
+                    continue
+                result = score_entity(args_cli.run_name, dataset, real_name, seed, params, device)
+                if result is None:
+                    print(f'[skip] {dataset}/{real_name} seed={seed}: no bestmodel.pkl yet or scoring failed')
+                    continue
+                row = dict(dataset=dataset, entity=real_name, seed=seed, **result['metrics'])
+                row['peak_in_range'] = result['peak_in_range']
+                rows.append(row)
+                print(f'  {dataset}/{real_name} seed={seed}: {result["metrics"]}')
+                save_all()
 
-            df = pd.DataFrame(rows)
-            df.to_csv(out_csv, index=False)
-            summary = df.groupby('dataset')[METRIC_KEYS].mean()
-            summary['n_entities'] = df.groupby('dataset').size()
-            summary.to_csv(summary_csv)
-            build_comparison(summary).to_csv(comparison_csv, index=False)
-
-    if rows:
-        df = pd.DataFrame(rows)
-        summary = df.groupby('dataset')[METRIC_KEYS].mean()
-        summary['n_entities'] = df.groupby('dataset').size()
+    summary = save_all()
+    if summary is not None:
         print(summary)
         print(build_comparison(summary).to_string(index=False))
-    print(f'Done. {len(rows)} entities scored. Wrote {out_csv}, {summary_csv}, and {comparison_csv}')
+    print(f'Done. {len(rows)} (entity, seed) pairs scored. Wrote {raw_csv}, {out_csv}, {summary_csv}, '
+          f'and {comparison_csv}')
 
 
 if __name__ == '__main__':
