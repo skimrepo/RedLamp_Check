@@ -67,8 +67,14 @@ def real_ground_truth_labels(dataset, real_name):
     return test_ds.entities[0].labels.reshape(-1)
 
 
-def score_entity(run_name, dataset, real_name, seed, params, device):
-    model_dir, disk_cfg = ci.discover_entity(run_name, dataset, real_name, seed)
+def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=None):
+    """Scores one entity's own test set. By default against its own dedicated
+    self-model (ci.discover_entity); pass model_dir to score against a fixed
+    external model instead (used by full_cross_domain_metrics.py to score a
+    domain-excluded pooled model against every entity, without retraining)."""
+    own_model_dir, disk_cfg = ci.discover_entity(run_name, dataset, real_name, seed)
+    if model_dir is None:
+        model_dir = own_model_dir
     if not os.path.isfile(f'{model_dir}/bestmodel.pkl'):
         return None
 
