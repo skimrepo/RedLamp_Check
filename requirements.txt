@@ -8,6 +8,7 @@ joblib==1.4.2
 kiwisolver==1.4.8
 matplotlib==3.10.0
 numpy==1.26.4
+openpyxl==3.1.5
 packaging==24.2
 pandas==2.2.3
 patool==3.1.0

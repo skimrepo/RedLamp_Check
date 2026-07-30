@@ -1,5 +1,7 @@
 dataset/
 result/
+Experiment 1/
+Experiment 0 - Exploratory/
 .venv/
 __pycache__/
 *.pyc
