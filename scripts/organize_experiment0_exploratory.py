@@ -12,6 +12,21 @@ Note: continuous_n697_excl_ucr and continuous_n944 are NOT moved here even
 though they're part of continuous_pool_scaling.py's own n-scaling curve —
 run organize_experiment1.py FIRST, which claims those two specifically for
 Experiment 1's Cross-OpenSource models.
+
+Intentionally NOT moved by this script (do this in a later, separate pass):
+  - result/{run_name}/anomaly_archive/, .../iops/ — still being actively
+    written by the in-progress multi-seed (1-4) training; touching these now
+    risks colliding with a running process.
+  - result/{run_name}/full_reproduction_metrics*.csv,
+    full_cross_domain_metrics*.csv — these are live resumable-script caches,
+    not finished output. Moving them away would make a future rerun of
+    full_reproduction_metrics.py (once seeds 1-4 finish) fail to find its
+    seed=0 cache and try to recompute it — but seed=0's model files are
+    already gone (moved into Experiment 1), so that recompute would fail and
+    silently drop seed=0 from the average. Leave these where the scripts
+    expect them until all seeds are done and no more reruns are needed.
+smd/smap/msl ARE safe to move now — self_accuracy_report.py's evaluation of
+them isn't part of any currently-running background job.
 """
 import argparse
 import os
@@ -24,6 +39,9 @@ MOVES = [
     ('_cross_domain_holdout', 'continuous_pool_scaling/results'),
     ('test_set_metrics.csv', 'test_set_anomaly_metrics/test_set_metrics.csv'),
     ('self_accuracy_all_datasets.csv', 'self_accuracy_report/self_accuracy_all_datasets.csv'),
+    ('smd', 'self_accuracy_report/models/smd'),
+    ('smap', 'self_accuracy_report/models/smap'),
+    ('msl', 'self_accuracy_report/models/msl'),
 ]
 CROSS_INFERENCE_DATASETS = ['anomaly_archive', 'iops', 'smd', 'smap', 'msl']
 
@@ -43,7 +61,7 @@ def move_if_exists(src, dest):
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
-    parser.add_argument('--exp_dir', default='./Experiment 0 - Exploratory')
+    parser.add_argument('--exp_dir', default='./result/Experiment 0 - Exploratory')
     args = parser.parse_args()
 
     base = f'./result/{args.run_name}'

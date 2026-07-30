@@ -149,7 +149,7 @@ def build_results(run_name, exp_dir):
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
-    parser.add_argument('--exp_dir', default='./Experiment 1')
+    parser.add_argument('--exp_dir', default='./result/Experiment 1')
     args = parser.parse_args()
 
     move_self_models(args.run_name, args.exp_dir)
