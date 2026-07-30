@@ -40,10 +40,19 @@ CROSS_MODEL_ALIAS = {
     'anomaly_archive': 'continuous_n697_excl_ucr',
     'iops': 'continuous_n944',
 }
+# organize_experiment1.py moves these two pooled models out of _pooled/ into
+# Experiment 1 under these alias names.
+EXPERIMENT1_ALIAS = {
+    'anomaly_archive': 'ucr_excl_ucr_pool',
+    'iops': 'kpi_full_pool',
+}
 
 
 def cross_model_dir(run_name, dataset, seed):
-    return f'./result/{run_name}/_pooled/{CROSS_MODEL_ALIAS[dataset]}/{seed}'
+    original = f'./result/{run_name}/_pooled/{CROSS_MODEL_ALIAS[dataset]}/{seed}'
+    if os.path.isfile(f'{original}/bestmodel.pkl'):
+        return original
+    return f'./result/Experiment 1/Models/Cross-OpenSource/{EXPERIMENT1_ALIAS[dataset]}/{seed}'
 
 
 def write_vs_self(cross_summary, run_name, vs_self_csv, verbose=False):
