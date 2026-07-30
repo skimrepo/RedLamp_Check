@@ -99,51 +99,76 @@ def _read_csv_if_exists(path):
     return pd.read_csv(path) if os.path.isfile(path) else pd.DataFrame()
 
 
+def _filter(df, dataset, drop_cols=()):
+    if df.empty:
+        return pd.DataFrame()
+    out = df[df['dataset'] == dataset].drop(columns=['dataset'])
+    return out.drop(columns=list(drop_cols), errors='ignore')
+
+
 def build_results(run_name, exp_dir):
     results_dir = os.path.join(exp_dir, 'Results')
     os.makedirs(results_dir, exist_ok=True)
 
     base = f'./result/{run_name}'
-    self_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics.csv')
-    self_summary = _read_csv_if_exists(f'{base}/full_reproduction_metrics_summary.csv')
-    cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_metrics.csv')
-    cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_summary.csv')
-    vs_self = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_vs_self.csv')
+    # Classification accuracy (validation split, injected pseudo-anomalies,
+    # 12-class task) — this is Experiment 1's primary metric.
+    acc_self_df = _read_csv_if_exists(f'{base}/self_accuracy_all_datasets.csv')
+    acc_cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_accuracy.csv')
+    acc_cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_accuracy_summary.csv')
+
+    # Real test-set anomaly-detection metrics (VUS-ROC/VUS-PR/RF/etc) — kept
+    # as a secondary reference, comparable to the paper's Table 3.
+    vus_self_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics.csv')
+    vus_self_summary = _read_csv_if_exists(f'{base}/full_reproduction_metrics_summary.csv')
+    vus_cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_metrics.csv')
+    vus_cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_summary.csv')
+    vus_vs_self = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_vs_self.csv')
 
     for dataset, out_name in DATASET_OUT_NAME.items():
-        s = self_df[self_df['dataset'] == dataset].drop(columns=['dataset']) if not self_df.empty else pd.DataFrame()
-        c = cross_df[cross_df['dataset'] == dataset].drop(columns=['dataset']) if not cross_df.empty else pd.DataFrame()
-        if dataset != 'anomaly_archive':
-            s = s.drop(columns=['peak_in_range'], errors='ignore')
-            c = c.drop(columns=['peak_in_range'], errors='ignore')
+        acc_s = _filter(acc_self_df, dataset, drop_cols=['model_dir'])
+        acc_c = _filter(acc_cross_df, dataset)
+        acc_merged = (acc_s.merge(acc_c, on='entity', how='outer', suffixes=('_self', '_cross'))
+                      if not acc_s.empty or not acc_c.empty else pd.DataFrame())
 
-        if not s.empty or not c.empty:
-            merged = s.merge(c, on='entity', how='outer', suffixes=('_self', '_cross'))
-        else:
-            merged = pd.DataFrame()
-
-        ss = self_summary[self_summary['dataset'] == dataset] if not self_summary.empty else pd.DataFrame()
-        cs = cross_summary[cross_summary['dataset'] == dataset] if not cross_summary.empty else pd.DataFrame()
-        vs = vs_self[vs_self['dataset'] == dataset].drop(columns=['dataset']) if not vs_self.empty else pd.DataFrame()
-
-        progress = pd.DataFrame([dict(
-            n_entities_self=int(ss['n_entities'].iloc[0]) if not ss.empty else 0,
-            n_entities_cross_opensource=int(cs['n_entities'].iloc[0]) if not cs.empty else 0,
+        acc_self_avg = float(acc_s['accuracy'].mean()) if not acc_s.empty else None
+        acc_cross_row = acc_cross_summary[acc_cross_summary['dataset'] == dataset] if not acc_cross_summary.empty else pd.DataFrame()
+        acc_cross_avg = float(acc_cross_row['accuracy'].iloc[0]) if not acc_cross_row.empty else None
+        acc_summary = pd.DataFrame([dict(
+            n_entities_self=len(acc_s),
+            n_entities_cross_opensource=int(acc_cross_row['n_entities'].iloc[0]) if not acc_cross_row.empty else 0,
             n_entities_total_possible=DATASET_TOTAL[dataset],
+            self_accuracy_avg=acc_self_avg,
+            cross_opensource_accuracy_avg=acc_cross_avg,
+            gap=(acc_self_avg - acc_cross_avg) if acc_self_avg is not None and acc_cross_avg is not None else None,
         )])
+
+        drop = [] if dataset == 'anomaly_archive' else ['peak_in_range']
+        vus_s = _filter(vus_self_df, dataset, drop_cols=drop)
+        vus_c = _filter(vus_cross_df, dataset, drop_cols=drop)
+        vus_merged = (vus_s.merge(vus_c, on='entity', how='outer', suffixes=('_self', '_cross'))
+                      if not vus_s.empty or not vus_c.empty else pd.DataFrame())
+        vus_ss = vus_self_summary[vus_self_summary['dataset'] == dataset] if not vus_self_summary.empty else pd.DataFrame()
+        vus_cs = vus_cross_summary[vus_cross_summary['dataset'] == dataset] if not vus_cross_summary.empty else pd.DataFrame()
+        vus_vs = _filter(vus_vs_self, dataset)
 
         out_path = os.path.join(results_dir, f'{out_name}_results.xlsx')
         with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-            s.to_excel(writer, sheet_name='Self', index=False)
-            c.to_excel(writer, sheet_name='Cross-OpenSource', index=False)
-            merged.to_excel(writer, sheet_name='Per-Entity Comparison', index=False)
-            progress.to_excel(writer, sheet_name='Summary', index=False, startrow=0)
-            ss.to_excel(writer, sheet_name='Summary', index=False, startrow=len(progress) + 2)
-            cs.to_excel(writer, sheet_name='Summary', index=False, startrow=len(progress) + 2 + len(ss) + 2)
-            vs.to_excel(writer, sheet_name='Summary', index=False,
-                        startrow=len(progress) + 2 + len(ss) + 2 + len(cs) + 2)
-        print(f'Wrote {out_path} '
-              f'(Self rows={len(s)}, Cross-OpenSource rows={len(c)}, progress={progress.iloc[0].to_dict()})')
+            # Primary: classification accuracy.
+            acc_s.to_excel(writer, sheet_name='Self', index=False)
+            acc_c.to_excel(writer, sheet_name='Cross-OpenSource', index=False)
+            acc_merged.to_excel(writer, sheet_name='Per-Entity Comparison', index=False)
+            acc_summary.to_excel(writer, sheet_name='Summary', index=False)
+            # Secondary: real test-set VUS-based anomaly detection metrics.
+            vus_s.to_excel(writer, sheet_name='Self (VUS Metrics)', index=False)
+            vus_c.to_excel(writer, sheet_name='Cross-OpenSource (VUS Metrics)', index=False)
+            vus_merged.to_excel(writer, sheet_name='Per-Entity Comparison (VUS)', index=False)
+            vus_ss.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False, startrow=0)
+            vus_cs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False, startrow=len(vus_ss) + 2)
+            vus_vs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False,
+                             startrow=len(vus_ss) + 2 + len(vus_cs) + 2)
+        print(f'Wrote {out_path} (accuracy: self={len(acc_s)} cross={len(acc_c)}, '
+              f'VUS: self={len(vus_s)} cross={len(vus_c)}, summary={acc_summary.iloc[0].to_dict()})')
 
 
 def run():

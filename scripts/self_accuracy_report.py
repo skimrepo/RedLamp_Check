@@ -63,21 +63,40 @@ def run():
     parser.add_argument('--run_name', default='test')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--datasets', nargs='+', default=list(DATASET_CFGS.keys()),
+                         help='Restrict to a subset, e.g. --datasets anomaly_archive iops for a faster '
+                              'Experiment-1-only run instead of all 5 datasets.')
     parser.add_argument('--out_csv', default=None)
+    parser.add_argument('--force', action='store_true',
+                         help='Recompute every entity even if already present in out_csv.')
     args_cli = parser.parse_args()
 
     device = utils.init_dl_program(args_cli.gpu, seed=args_cli.seed)
     out_csv = args_cli.out_csv or f'./result/{args_cli.run_name}/self_accuracy_all_datasets.csv'
 
     rows = []
-    for dataset, cfg in DATASET_CFGS.items():
+    already_done = set()
+    if not args_cli.force and os.path.isfile(out_csv):
+        prior = pd.read_csv(out_csv)
+        rows = prior.to_dict('records')
+        already_done = set(zip(prior['dataset'], prior['entity']))
+        print(f'Resuming from {out_csv}: {len(already_done)} entities already scored, skipping those.')
+
+    for dataset in args_cli.datasets:
+        cfg = DATASET_CFGS[dataset]
         entities = discover_dataset_entities(args_cli.run_name, dataset)
         if not entities:
             print(f'[skip] no trained entities found for {dataset}')
             continue
         for entity in entities:
+            if (dataset, entity) in already_done:
+                continue
             print(f'Evaluating: dataset={dataset} entity={entity}')
-            model_dir, disk_cfg = ci.discover_entity(args_cli.run_name, dataset, entity, args_cli.seed)
+            try:
+                model_dir, disk_cfg = ci.discover_entity(args_cli.run_name, dataset, entity, args_cli.seed)
+            except FileNotFoundError:
+                print(f'  [skip] no trained model found for {dataset}/{entity}')
+                continue
             dataparams = ci.build_dataparams(dataset, entity, cfg, disk_cfg)
             _, val_dl = datautils.load_dataloader_aug(dataparams, group='train')
 
@@ -89,10 +108,9 @@ def run():
             rows.append(dict(dataset=dataset, entity=entity, model_dir=model_dir,
                               val_windows=n_windows, accuracy=accuracy))
             print(f'  -> accuracy={accuracy:.4f} (n={n_windows})')
+            pd.DataFrame(rows).to_csv(out_csv, index=False)
 
-    df = pd.DataFrame(rows)
-    df.to_csv(out_csv, index=False)
-    print('Done. Wrote', out_csv)
+    print(f'Done. {len(rows)} entities scored. Wrote {out_csv}')
 
 
 if __name__ == '__main__':
