@@ -69,20 +69,20 @@ def discover_entity(run_name, dataset, entity, seed):
                           f'— pass --entities explicitly or clean up result/')
 
     # Not found at the original location — organize_experiment1.py may have
-    # already moved this entity's seed=0 model to Experiment 1 (stripping the
+    # already moved this entity's seed=0 model to Experiment_1 (stripping the
     # d*_b*_w*_s* config-hash segment in the process, since it's meaningless
     # outside this lookup). window_step doesn't actually matter for scoring:
     # datautils.load_dataloader_aug hardcodes window_step=1 for group='test_all'
     # regardless of what's passed in, so these fixed defaults (main.py's actual
     # constants for both datasets) are safe here even though the real per-entity
     # window_step (which varies for anomaly_archive) is no longer recoverable.
-    fallback_dir = f'./result/Experiment 1/Models/Self/{dataset}/{entity}/{seed}'
+    fallback_dir = f'./result/Experiment_1/Models/Self/{dataset}/{entity}/{seed}'
     if os.path.isfile(os.path.join(fallback_dir, 'bestmodel.pkl')):
         disk_cfg = dict(downsampling=1, batch_size=128, window_size=100, window_step=1)
         return fallback_dir, disk_cfg
 
     raise FileNotFoundError(f'No trained model found for entity={entity!r} matching {pattern} '
-                             f'or at the Experiment 1 fallback {fallback_dir}')
+                             f'or at the Experiment_1 fallback {fallback_dir}')
 
 
 def build_model_args(cfg, window_size):

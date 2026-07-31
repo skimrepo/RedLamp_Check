@@ -5,7 +5,7 @@ Cross-OpenSource (Core-Clustering's
 scripts/eval_cross_opensource_on_anomsim.py -> outputs/
 cross_opensource_accuracy.csv), and Cross-AnomSim (the all-AnomSim pooled
 model's OWN classification_accuracy.csv from its training run) into
-RedLamp_Check's Experiment 1/Results/, matching ucr_results.xlsx/
+RedLamp_Check's Experiment_1/Results/, matching ucr_results.xlsx/
 kpi_results.xlsx's sheet-layout convention (organize_experiment1.py, not
 modified here).
 
@@ -47,7 +47,7 @@ def run():
                               '(e.g. Core-Clustering/outputs/cross_anomsim/<seed>/'
                               'classification_accuracy.csv) -- domain-level val-group accuracy '
                               'from its own training run. Optional; omit if not trained yet.')
-    parser.add_argument('--out_xlsx', default='./result/Experiment 1/Results/anomsim_results.xlsx')
+    parser.add_argument('--out_xlsx', default='./result/Experiment_1/Results/anomsim_results.xlsx')
     args = parser.parse_args()
 
     self_df = _read_csv_if_exists(args.self_accuracy_csv)

@@ -6,7 +6,7 @@ validation split, using the same 12-class pseudo-anomaly classification
 accuracy metric as self_accuracy_report.py (Self) and
 full_cross_domain_accuracy.py (Cross-OpenSource) -- so Self vs
 Cross-OpenSource vs Cross-AnomSim are all directly comparable in the same
-units, matching Experiment 1's primary metric.
+units, matching Experiment_1's metric.
 
 This is the classification-accuracy counterpart to
 simulation_cross_domain_metrics.py (which computes the paper's VUS-based

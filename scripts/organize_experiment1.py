@@ -1,8 +1,15 @@
 """
-Organize Experiment 1: physically MOVES (not copies) the seed=0 Self models
-and the two Cross-OpenSource pooled models out of `result/{run_name}/...`
-into a clean `Experiment 1/` folder, and builds `ucr_results.xlsx` /
-`kpi_results.xlsx` from the already-produced result CSVs.
+Organize Experiment_1 (injected-anomaly classification accuracy): physically
+MOVES (not copies) the seed=0 Self models and the two Cross-OpenSource
+pooled models out of `result/{run_name}/...` into a clean `Experiment_1/`
+folder, and builds `ucr_results.xlsx` / `kpi_results.xlsx` (Self /
+Cross-OpenSource / Cross-AnomSim / Per-Entity Comparison / Summary, all
+classification-accuracy-based) from the already-produced result CSVs.
+
+Real-test-set VUS-based metrics (the paper's 5 range-based metrics) live in
+the separate Experiment_2 (see scripts/organize_experiment2.py) — this
+script no longer builds those sheets, to keep the injected-anomaly vs
+real-anomaly distinction clean rather than mixing both in one workbook.
 
 ACCEPTED RISK (explicit user decision): moving a Self model's seed=0 folder
 away from `result/{run_name}/{dataset}/{entity}/d*_b*_w*_s*/0/` means
@@ -34,6 +41,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cross_inference as ci
 import full_reproduction_metrics as frm
+from xlsx_merge_utils import merge_3way
 
 SEED = 0
 
@@ -132,34 +140,13 @@ def _filter(df, dataset, drop_cols=()):
     return out.drop(columns=list(drop_cols), errors='ignore')
 
 
-def _suffix_cols(df, suffix, keep=('entity',)):
-    """Renames every column except `keep` by appending _suffix -- used to
-    3-way merge Self/Cross-OpenSource/Cross-AnomSim frames that otherwise
-    share identical column names (accuracy/val_windows, or the 5 VUS metrics
-    + peak_in_range)."""
-    if df.empty:
-        return df
-    return df.rename(columns={c: f'{c}_{suffix}' for c in df.columns if c not in keep})
-
-
-def _merge_3way(frames_with_suffix):
-    """frames_with_suffix: list of (df, suffix) pairs. Renames non-entity
-    columns per frame, then outer-merges whichever frames are non-empty on
-    'entity'. Returns an empty DataFrame if all inputs are empty."""
-    renamed = [r for r in (_suffix_cols(df, suffix) for df, suffix in frames_with_suffix) if not r.empty]
-    merged = pd.DataFrame()
-    for r in renamed:
-        merged = r if merged.empty else merged.merge(r, on='entity', how='outer')
-    return merged
-
-
 def build_results(run_name, exp_dir):
     results_dir = os.path.join(exp_dir, 'Results')
     os.makedirs(results_dir, exist_ok=True)
 
     base = f'./result/{run_name}'
     # Classification accuracy (validation split, injected pseudo-anomalies,
-    # 12-class task) — this is Experiment 1's primary metric.
+    # 12-class task) — this is Experiment_1's only metric now.
     acc_self_df = _read_csv_if_exists(f'{base}/self_accuracy_all_datasets.csv')
     acc_cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_accuracy.csv')
     acc_cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_accuracy_summary.csv')
@@ -170,24 +157,11 @@ def build_results(run_name, exp_dir):
     acc_anomsim_df = _read_csv_if_exists(f'{base}/simulation_cross_domain_accuracy.csv')
     acc_anomsim_summary = _read_csv_if_exists(f'{base}/simulation_cross_domain_accuracy_summary.csv')
 
-    # Real test-set anomaly-detection metrics (VUS-ROC/VUS-PR/RF/etc) — kept
-    # as a secondary reference, comparable to the paper's Table 3.
-    vus_self_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics.csv')
-    vus_self_summary = _read_csv_if_exists(f'{base}/full_reproduction_metrics_summary.csv')
-    vus_cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_metrics.csv')
-    vus_cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_summary.csv')
-    vus_vs_self = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_vs_self.csv')
-    # Cross-AnomSim's VUS-based real test-set metrics (produced separately by
-    # simulation_cross_domain_metrics.py --sim_model_dir <cross_anomsim checkpoint>,
-    # since that model lives in the sibling Core-Clustering repo).
-    vus_anomsim_df = _read_csv_if_exists(f'{base}/simulation_cross_domain_metrics.csv')
-    vus_anomsim_summary = _read_csv_if_exists(f'{base}/simulation_cross_domain_metrics_summary.csv')
-
     for dataset, out_name in DATASET_OUT_NAME.items():
         acc_s = _filter(acc_self_df, dataset, drop_cols=['model_dir'])
         acc_c = _filter(acc_cross_df, dataset)
         acc_a = _filter(acc_anomsim_df, dataset)
-        acc_merged = _merge_3way([(acc_s, 'self'), (acc_c, 'cross_opensource'), (acc_a, 'cross_anomsim')])
+        acc_merged = merge_3way([(acc_s, 'self'), (acc_c, 'cross_opensource'), (acc_a, 'cross_anomsim')])
 
         acc_self_avg = float(acc_s['accuracy'].mean()) if not acc_s.empty else None
         acc_cross_row = acc_cross_summary[acc_cross_summary['dataset'] == dataset] if not acc_cross_summary.empty else pd.DataFrame()
@@ -208,44 +182,21 @@ def build_results(run_name, exp_dir):
                 if acc_self_avg is not None and acc_anomsim_avg is not None else None,
         )])
 
-        drop = [] if dataset == 'anomaly_archive' else ['peak_in_range']
-        vus_s = _filter(vus_self_df, dataset, drop_cols=drop)
-        vus_c = _filter(vus_cross_df, dataset, drop_cols=drop)
-        vus_a = _filter(vus_anomsim_df, dataset, drop_cols=drop)
-        vus_merged = _merge_3way([(vus_s, 'self'), (vus_c, 'cross_opensource'), (vus_a, 'cross_anomsim')])
-        vus_ss = vus_self_summary[vus_self_summary['dataset'] == dataset] if not vus_self_summary.empty else pd.DataFrame()
-        vus_cs = vus_cross_summary[vus_cross_summary['dataset'] == dataset] if not vus_cross_summary.empty else pd.DataFrame()
-        vus_as = vus_anomsim_summary[vus_anomsim_summary['dataset'] == dataset] if not vus_anomsim_summary.empty else pd.DataFrame()
-        vus_vs = _filter(vus_vs_self, dataset)
-
         out_path = os.path.join(results_dir, f'{out_name}_results.xlsx')
         with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-            # Primary: classification accuracy.
             acc_s.to_excel(writer, sheet_name='Self', index=False)
             acc_c.to_excel(writer, sheet_name='Cross-OpenSource', index=False)
             acc_a.to_excel(writer, sheet_name='Cross-AnomSim', index=False)
             acc_merged.to_excel(writer, sheet_name='Per-Entity Comparison', index=False)
             acc_summary.to_excel(writer, sheet_name='Summary', index=False)
-            # Secondary: real test-set VUS-based anomaly detection metrics.
-            vus_s.to_excel(writer, sheet_name='Self (VUS Metrics)', index=False)
-            vus_c.to_excel(writer, sheet_name='Cross-OpenSource (VUS Metrics)', index=False)
-            vus_a.to_excel(writer, sheet_name='Cross-AnomSim (VUS Metrics)', index=False)
-            vus_merged.to_excel(writer, sheet_name='Per-Entity Comparison (VUS)', index=False)
-            vus_ss.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False, startrow=0)
-            vus_cs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False, startrow=len(vus_ss) + 2)
-            vus_as.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False,
-                             startrow=len(vus_ss) + 2 + len(vus_cs) + 2)
-            vus_vs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False,
-                             startrow=len(vus_ss) + 2 + len(vus_cs) + 2 + len(vus_as) + 2)
         print(f'Wrote {out_path} (accuracy: self={len(acc_s)} cross-opensource={len(acc_c)} '
-              f'cross-anomsim={len(acc_a)}, VUS: self={len(vus_s)} cross-opensource={len(vus_c)} '
-              f'cross-anomsim={len(vus_a)}, summary={acc_summary.iloc[0].to_dict()})')
+              f'cross-anomsim={len(acc_a)}, summary={acc_summary.iloc[0].to_dict()})')
 
 
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
-    parser.add_argument('--exp_dir', default='./result/Experiment 1')
+    parser.add_argument('--exp_dir', default='./result/Experiment_1')
     parser.add_argument('--cross_anomsim_model_dir', default=None,
                          help='Path to the Cross-AnomSim checkpoint dir in the sibling Core-Clustering '
                               'repo (e.g. /path/to/Core-Clustering/outputs/cross_anomsim/0), containing '
@@ -257,7 +208,7 @@ def run():
     move_cross_models(args.run_name, args.exp_dir)
     copy_cross_anomsim_model(args.exp_dir, args.cross_anomsim_model_dir, args.seed)
     build_results(args.run_name, args.exp_dir)
-    print(f'Done. Experiment 1 organized at {args.exp_dir}')
+    print(f'Done. Experiment_1 organized at {args.exp_dir}')
 
 
 if __name__ == '__main__':
