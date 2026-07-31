@@ -132,6 +132,27 @@ def _filter(df, dataset, drop_cols=()):
     return out.drop(columns=list(drop_cols), errors='ignore')
 
 
+def _suffix_cols(df, suffix, keep=('entity',)):
+    """Renames every column except `keep` by appending _suffix -- used to
+    3-way merge Self/Cross-OpenSource/Cross-AnomSim frames that otherwise
+    share identical column names (accuracy/val_windows, or the 5 VUS metrics
+    + peak_in_range)."""
+    if df.empty:
+        return df
+    return df.rename(columns={c: f'{c}_{suffix}' for c in df.columns if c not in keep})
+
+
+def _merge_3way(frames_with_suffix):
+    """frames_with_suffix: list of (df, suffix) pairs. Renames non-entity
+    columns per frame, then outer-merges whichever frames are non-empty on
+    'entity'. Returns an empty DataFrame if all inputs are empty."""
+    renamed = [r for r in (_suffix_cols(df, suffix) for df, suffix in frames_with_suffix) if not r.empty]
+    merged = pd.DataFrame()
+    for r in renamed:
+        merged = r if merged.empty else merged.merge(r, on='entity', how='outer')
+    return merged
+
+
 def build_results(run_name, exp_dir):
     results_dir = os.path.join(exp_dir, 'Results')
     os.makedirs(results_dir, exist_ok=True)
@@ -156,22 +177,17 @@ def build_results(run_name, exp_dir):
     vus_cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_metrics.csv')
     vus_cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_summary.csv')
     vus_vs_self = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_vs_self.csv')
+    # Cross-AnomSim's VUS-based real test-set metrics (produced separately by
+    # simulation_cross_domain_metrics.py --sim_model_dir <cross_anomsim checkpoint>,
+    # since that model lives in the sibling Core-Clustering repo).
+    vus_anomsim_df = _read_csv_if_exists(f'{base}/simulation_cross_domain_metrics.csv')
+    vus_anomsim_summary = _read_csv_if_exists(f'{base}/simulation_cross_domain_metrics_summary.csv')
 
     for dataset, out_name in DATASET_OUT_NAME.items():
         acc_s = _filter(acc_self_df, dataset, drop_cols=['model_dir'])
         acc_c = _filter(acc_cross_df, dataset)
         acc_a = _filter(acc_anomsim_df, dataset)
-
-        def _rename_metric_cols(df, suffix):
-            return df if df.empty else df.rename(columns={'accuracy': f'accuracy_{suffix}',
-                                                            'val_windows': f'val_windows_{suffix}'})
-
-        renamed = [r for r in (_rename_metric_cols(acc_s, 'self'),
-                                _rename_metric_cols(acc_c, 'cross_opensource'),
-                                _rename_metric_cols(acc_a, 'cross_anomsim')) if not r.empty]
-        acc_merged = pd.DataFrame()
-        for r in renamed:
-            acc_merged = r if acc_merged.empty else acc_merged.merge(r, on='entity', how='outer')
+        acc_merged = _merge_3way([(acc_s, 'self'), (acc_c, 'cross_opensource'), (acc_a, 'cross_anomsim')])
 
         acc_self_avg = float(acc_s['accuracy'].mean()) if not acc_s.empty else None
         acc_cross_row = acc_cross_summary[acc_cross_summary['dataset'] == dataset] if not acc_cross_summary.empty else pd.DataFrame()
@@ -195,10 +211,11 @@ def build_results(run_name, exp_dir):
         drop = [] if dataset == 'anomaly_archive' else ['peak_in_range']
         vus_s = _filter(vus_self_df, dataset, drop_cols=drop)
         vus_c = _filter(vus_cross_df, dataset, drop_cols=drop)
-        vus_merged = (vus_s.merge(vus_c, on='entity', how='outer', suffixes=('_self', '_cross'))
-                      if not vus_s.empty or not vus_c.empty else pd.DataFrame())
+        vus_a = _filter(vus_anomsim_df, dataset, drop_cols=drop)
+        vus_merged = _merge_3way([(vus_s, 'self'), (vus_c, 'cross_opensource'), (vus_a, 'cross_anomsim')])
         vus_ss = vus_self_summary[vus_self_summary['dataset'] == dataset] if not vus_self_summary.empty else pd.DataFrame()
         vus_cs = vus_cross_summary[vus_cross_summary['dataset'] == dataset] if not vus_cross_summary.empty else pd.DataFrame()
+        vus_as = vus_anomsim_summary[vus_anomsim_summary['dataset'] == dataset] if not vus_anomsim_summary.empty else pd.DataFrame()
         vus_vs = _filter(vus_vs_self, dataset)
 
         out_path = os.path.join(results_dir, f'{out_name}_results.xlsx')
@@ -212,14 +229,17 @@ def build_results(run_name, exp_dir):
             # Secondary: real test-set VUS-based anomaly detection metrics.
             vus_s.to_excel(writer, sheet_name='Self (VUS Metrics)', index=False)
             vus_c.to_excel(writer, sheet_name='Cross-OpenSource (VUS Metrics)', index=False)
+            vus_a.to_excel(writer, sheet_name='Cross-AnomSim (VUS Metrics)', index=False)
             vus_merged.to_excel(writer, sheet_name='Per-Entity Comparison (VUS)', index=False)
             vus_ss.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False, startrow=0)
             vus_cs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False, startrow=len(vus_ss) + 2)
-            vus_vs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False,
+            vus_as.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False,
                              startrow=len(vus_ss) + 2 + len(vus_cs) + 2)
+            vus_vs.to_excel(writer, sheet_name='Summary (VUS Metrics)', index=False,
+                             startrow=len(vus_ss) + 2 + len(vus_cs) + 2 + len(vus_as) + 2)
         print(f'Wrote {out_path} (accuracy: self={len(acc_s)} cross-opensource={len(acc_c)} '
-              f'cross-anomsim={len(acc_a)}, VUS: self={len(vus_s)} cross={len(vus_c)}, '
-              f'summary={acc_summary.iloc[0].to_dict()})')
+              f'cross-anomsim={len(acc_a)}, VUS: self={len(vus_s)} cross-opensource={len(vus_c)} '
+              f'cross-anomsim={len(vus_a)}, summary={acc_summary.iloc[0].to_dict()})')
 
 
 def run():
