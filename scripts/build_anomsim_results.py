@@ -61,13 +61,26 @@ def run():
 
     self_avg = float(self_df['accuracy'].mean()) if not self_df.empty else None
     cross_avg = float(cross_df['accuracy'].mean()) if not cross_df.empty else None
+    # Cross-AnomSim's own AnomSim_v1 self-check is domain-level (9 rows), not
+    # per-entity like Self/Cross-OpenSource -- report both a simple mean
+    # across domains (consistent with how self_avg/cross_avg average across
+    # their own per-entity rows) and a window-count-weighted mean (pools all
+    # held-out windows together, less sensitive to small domains skewing the
+    # simple mean if domain sample sizes differ a lot).
+    anomsim_avg = float(anomsim_df['accuracy'].mean()) if not anomsim_df.empty else None
+    anomsim_weighted_avg = (float(anomsim_df['n_correct'].sum()) / float(anomsim_df['n_total'].sum())
+                             if not anomsim_df.empty else None)
     summary = pd.DataFrame([dict(
         n_entities_self=len(self_df),
         n_entities_cross_opensource=len(cross_df),
+        n_domains_cross_anomsim=len(anomsim_df),
         n_entities_total_possible=N_ANOMSIM_V1_ENTITIES,
         self_accuracy_avg=self_avg,
         cross_opensource_accuracy_avg=cross_avg,
-        gap=(self_avg - cross_avg) if self_avg is not None and cross_avg is not None else None,
+        cross_anomsim_accuracy_avg=anomsim_avg,
+        cross_anomsim_accuracy_weighted_avg=anomsim_weighted_avg,
+        gap_self_vs_cross_opensource=(self_avg - cross_avg) if self_avg is not None and cross_avg is not None else None,
+        gap_self_vs_cross_anomsim=(self_avg - anomsim_avg) if self_avg is not None and anomsim_avg is not None else None,
     )])
 
     out_dir = os.path.dirname(args.out_xlsx)
