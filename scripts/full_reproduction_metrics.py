@@ -74,11 +74,17 @@ def real_ground_truth_labels(dataset, real_name):
     return test_ds.entities[0].labels.reshape(-1)
 
 
-def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=None):
+def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=None, include_curves=False):
     """Scores one entity's own test set. By default against its own dedicated
     self-model (ci.discover_entity); pass model_dir to score against a fixed
     external model instead (used by full_cross_domain_metrics.py to score a
-    domain-excluded pooled model against every entity, without retraining)."""
+    domain-excluded pooled model against every entity, without retraining).
+
+    include_curves=True additionally returns the aligned score/real_labels
+    arrays (and the point-wise input series) instead of just the 5 scalar
+    metrics -- used by scripts/analyze_ds1_gap_entities.py to plot actual
+    score curves for a handful of specific entities, without needing every
+    caller of this function to pay for carrying full-length arrays around."""
     try:
         own_model_dir, disk_cfg = ci.discover_entity(run_name, dataset, real_name, seed)
     except FileNotFoundError:
@@ -123,7 +129,17 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
             peak_idx = int(np.argmax(score))
             peak_in_range = int(anomaly_idxs.min() <= peak_idx <= anomaly_idxs.max())
 
-    return dict(metrics=metrics, peak_in_range=peak_in_range)
+    result = dict(metrics=metrics, peak_in_range=peak_in_range)
+    if include_curves:
+        # Point-wise input series: last timestep of each window (window_step=1
+        # so consecutive windows overlap by W-1), channel 0, zero-padded front
+        # to align with `score`/`real_labels` -- same transform main.py's own
+        # (dataset == 'anomaly_archive') plotting block applies.
+        raw_series = np.concatenate([np.zeros(window_size - 1), inputs[:, -1, 0]])
+        result['score'] = score
+        result['real_labels'] = real_labels
+        result['raw_series'] = raw_series
+    return result
 
 
 def build_comparison(summary):
