@@ -30,8 +30,13 @@ full_reproduction_metrics.py). The `Self` sheet is the entity-level average
 across whatever seeds are done so far; a separate `Self (All Seeds)` sheet
 (long format: one row per entity+seed) exposes the individual per-seed
 values underneath that average, straight from full_reproduction_metrics_raw.csv.
-Cross-OpenSource/Cross-AnomSim are single-seed pooled models, so they have
-no per-seed breakdown to show.
+A third `Self (Best Seed)` sheet is the cherry-picked ceiling: per entity, the
+max across seeds INDEPENDENTLY for each metric (so VUS_ROC and VUS_PR may each
+come from a different winning seed) -- "how good could this get if we could
+always pick the best seed per metric", not the paper's own methodology (see
+full_reproduction_metrics.py's aggregate_best()). Cross-OpenSource/
+Cross-AnomSim are single-seed pooled models, so they have no per-seed
+breakdown to show.
 
 Safe to rerun any time: always freshly rewrites the Excel workbooks from
 whatever's currently in the source CSVs.
@@ -67,6 +72,13 @@ def build_results(run_name, exp_dir):
     self_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics.csv')
     self_raw_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics_raw.csv')
     self_summary = _read_csv_if_exists(f'{base}/full_reproduction_metrics_summary.csv')
+    # Cherry-picked ceiling: per entity, the max across seeds INDEPENDENTLY
+    # for each metric (so a single entity's VUS_ROC and VUS_PR "best" may come
+    # from two different seeds) -- "how good could this get if we could
+    # always pick the best-performing seed per metric", not the paper's own
+    # methodology (see full_reproduction_metrics.py's aggregate_best()).
+    self_best_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics_best.csv')
+    self_best_summary = _read_csv_if_exists(f'{base}/full_reproduction_metrics_best_summary.csv')
     cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_metrics.csv')
     cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_summary.csv')
     vs_self = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_vs_self.csv')
@@ -79,11 +91,13 @@ def build_results(run_name, exp_dir):
         s_all_seeds = _filter(self_raw_df, dataset, drop_cols=drop)
         if not s_all_seeds.empty:
             s_all_seeds = s_all_seeds.sort_values(['entity', 'seed'])
+        s_best = _filter(self_best_df, dataset, drop_cols=drop)
         c = _filter(cross_df, dataset, drop_cols=drop)
         a = _filter(anomsim_df, dataset, drop_cols=drop)
         merged = merge_3way([(s, 'self'), (c, 'cross_opensource'), (a, 'cross_anomsim')])
 
         ss = self_summary[self_summary['dataset'] == dataset] if not self_summary.empty else pd.DataFrame()
+        bs = self_best_summary[self_best_summary['dataset'] == dataset] if not self_best_summary.empty else pd.DataFrame()
         cs = cross_summary[cross_summary['dataset'] == dataset] if not cross_summary.empty else pd.DataFrame()
         asum = anomsim_summary[anomsim_summary['dataset'] == dataset] if not anomsim_summary.empty else pd.DataFrame()
         vs = _filter(vs_self, dataset)
@@ -92,16 +106,19 @@ def build_results(run_name, exp_dir):
         with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
             s.to_excel(writer, sheet_name='Self', index=False)
             s_all_seeds.to_excel(writer, sheet_name='Self (All Seeds)', index=False)
+            s_best.to_excel(writer, sheet_name='Self (Best Seed)', index=False)
             c.to_excel(writer, sheet_name='Cross-OpenSource', index=False)
             a.to_excel(writer, sheet_name='Cross-AnomSim', index=False)
             merged.to_excel(writer, sheet_name='Per-Entity Comparison', index=False)
             ss.to_excel(writer, sheet_name='Summary', index=False, startrow=0)
-            cs.to_excel(writer, sheet_name='Summary', index=False, startrow=len(ss) + 2)
-            asum.to_excel(writer, sheet_name='Summary', index=False, startrow=len(ss) + 2 + len(cs) + 2)
+            bs.to_excel(writer, sheet_name='Summary', index=False, startrow=len(ss) + 2)
+            cs.to_excel(writer, sheet_name='Summary', index=False, startrow=len(ss) + 2 + len(bs) + 2)
+            asum.to_excel(writer, sheet_name='Summary', index=False,
+                          startrow=len(ss) + 2 + len(bs) + 2 + len(cs) + 2)
             vs.to_excel(writer, sheet_name='Summary', index=False,
-                        startrow=len(ss) + 2 + len(cs) + 2 + len(asum) + 2)
+                        startrow=len(ss) + 2 + len(bs) + 2 + len(cs) + 2 + len(asum) + 2)
         print(f'Wrote {out_path} (self={len(s)} entities, self all-seed rows={len(s_all_seeds)}, '
-              f'cross-opensource={len(c)}, cross-anomsim={len(a)})')
+              f'self best-seed rows={len(s_best)}, cross-opensource={len(c)}, cross-anomsim={len(a)})')
 
     readme_path = os.path.join(results_dir, 'README.txt')
     if not os.path.isfile(readme_path):

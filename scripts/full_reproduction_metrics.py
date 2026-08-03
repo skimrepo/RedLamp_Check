@@ -14,6 +14,14 @@ training additional seeds needs no code change, just rerunning main.py with
 --seed 1/2/3/4). The average is taken in the same two levels as the paper:
 first across seeds within an entity, then across entities within a dataset.
 
+Alongside that mean-based aggregate, also writes a "best seed" cherry-picked
+ceiling (full_reproduction_metrics_best.csv / _best_summary.csv, see
+aggregate_best()): per entity, the max across seeds for EACH metric
+independently (so a single entity's VUS_ROC and VUS_PR "best" may come from
+two different seeds) — an optimistic upper bound on "how good could this get
+if we could always pick the best-performing seed per metric", not the
+paper's own methodology.
+
 Robust to partial training: any (entity, seed) pair without a bestmodel.pkl
 yet is skipped, not errored, and every output file is rewritten after every
 newly-scored (entity, seed) pair — so this can be run repeatedly while
@@ -173,6 +181,31 @@ def aggregate(raw_rows):
     return entity_df, summary
 
 
+def aggregate_best(raw_rows):
+    """Optimistic-ceiling counterpart to aggregate(): per (dataset, entity),
+    takes the max across seeds INDEPENDENTLY for each metric (so a single
+    entity's VUS_ROC and VUS_PR "best" values may come from two different
+    seeds) -- this is "if we could always cherry-pick the best-performing
+    seed per metric", not a single winning seed's full row. Then averages
+    those per-metric maxes across entities within a dataset, same as
+    aggregate()'s mean does. Returns (entity_df, summary) or (None, None) if
+    raw_rows is empty."""
+    if not raw_rows:
+        return None, None
+    raw_df = pd.DataFrame(raw_rows)
+
+    entity_df = raw_df.groupby(['dataset', 'entity'], as_index=False).agg(
+        **{k: (k, 'max') for k in METRIC_KEYS},
+        peak_in_range=('peak_in_range', 'max'),
+        n_seeds=('seed', 'nunique'),
+    )
+
+    summary = entity_df.groupby('dataset')[METRIC_KEYS].mean()
+    summary['n_entities'] = entity_df.groupby('dataset').size()
+    summary['avg_seeds_per_entity'] = entity_df.groupby('dataset')['n_seeds'].mean()
+    return entity_df, summary
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
@@ -192,6 +225,8 @@ def run():
     raw_csv = out_csv.replace('.csv', '_raw.csv')
     summary_csv = out_csv.replace('.csv', '_summary.csv')
     comparison_csv = out_csv.replace('.csv', '_vs_paper.csv')
+    best_csv = out_csv.replace('.csv', '_best.csv')
+    best_summary_csv = out_csv.replace('.csv', '_best_summary.csv')
 
     # Architecture hyperparams only — params.seed itself is never read during
     # inference (main.test() just loads bestmodel.pkl and runs model.eval()),
@@ -226,6 +261,10 @@ def run():
         entity_df.to_csv(out_csv, index=False)
         summary.to_csv(summary_csv)
         build_comparison(summary).to_csv(comparison_csv, index=False)
+
+        best_entity_df, best_summary = aggregate_best(rows)
+        best_entity_df.to_csv(best_csv, index=False)
+        best_summary.to_csv(best_summary_csv)
         return summary
 
     for dataset in ['anomaly_archive', 'iops']:
@@ -250,7 +289,7 @@ def run():
         print(summary)
         print(build_comparison(summary).to_string(index=False))
     print(f'Done. {len(rows)} (entity, seed) pairs scored. Wrote {raw_csv}, {out_csv}, {summary_csv}, '
-          f'and {comparison_csv}')
+          f'{comparison_csv}, {best_csv}, and {best_summary_csv}')
 
 
 if __name__ == '__main__':

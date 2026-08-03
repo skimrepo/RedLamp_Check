@@ -24,7 +24,17 @@ Likewise, moving continuous_n944 means continuous_pool_scaling.py's own
 n=944 scaling-curve checkpoint is no longer separately available (its
 already-computed eval CSVs are unaffected).
 
-Only seed=0 is moved — seeds 1-4 are still training and untouched here.
+Only seed=0 is moved — seeds 1-4 are still training and untouched here (their
+model files stay put; self_accuracy_report.py can still score them in place).
+
+Self's accuracy is now scored across seeds 0-4 too (self_accuracy_report.py
+--seeds, mirroring full_reproduction_metrics.py's own multi-seed pattern): the
+`Self` sheet is the seed-mean, `Self (All Seeds)` exposes the raw per-entity+
+seed values, and `Self (Best Seed)` is the cherry-picked ceiling -- per entity,
+the max accuracy across seeds, i.e. "how good could this get if we always
+picked the best-performing seed" (not the paper's own methodology).
+Cross-OpenSource/Cross-AnomSim remain single-seed pooled models with no
+per-seed breakdown.
 
 Safe to rerun: already-moved entities are skipped (source no longer exists
 at the original path); Results/ is always freshly rewritten from whatever's
@@ -146,8 +156,17 @@ def build_results(run_name, exp_dir):
 
     base = f'./result/{run_name}'
     # Classification accuracy (validation split, injected pseudo-anomalies,
-    # 12-class task) — this is Experiment_1's only metric now.
+    # 12-class task) — this is Experiment_1's only metric now. Self is scored
+    # across seeds 0-4 (self_accuracy_report.py's own "average results of five
+    # runs" methodology, mirroring full_reproduction_metrics.py) -- the "Self"
+    # sheet below is the seed-mean, "Self (All Seeds)" exposes the raw
+    # per-entity+seed values, "Self (Best Seed)" is the cherry-picked
+    # per-metric-independent max across seeds (an optimistic ceiling, not the
+    # paper's methodology). Cross-OpenSource/Cross-AnomSim are single-seed
+    # pooled models, so they have no per-seed breakdown to show.
     acc_self_df = _read_csv_if_exists(f'{base}/self_accuracy_all_datasets.csv')
+    acc_self_raw_df = _read_csv_if_exists(f'{base}/self_accuracy_all_datasets_raw.csv')
+    acc_self_best_df = _read_csv_if_exists(f'{base}/self_accuracy_all_datasets_best.csv')
     acc_cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_accuracy.csv')
     acc_cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_accuracy_summary.csv')
     # Cross-AnomSim: trained purely on synthetic AnomSim_v1, scored against
@@ -159,11 +178,16 @@ def build_results(run_name, exp_dir):
 
     for dataset, out_name in DATASET_OUT_NAME.items():
         acc_s = _filter(acc_self_df, dataset, drop_cols=['model_dir'])
+        acc_s_all_seeds = _filter(acc_self_raw_df, dataset, drop_cols=['model_dir'])
+        if not acc_s_all_seeds.empty:
+            acc_s_all_seeds = acc_s_all_seeds.sort_values(['entity', 'seed'])
+        acc_s_best = _filter(acc_self_best_df, dataset, drop_cols=['model_dir'])
         acc_c = _filter(acc_cross_df, dataset)
         acc_a = _filter(acc_anomsim_df, dataset)
         acc_merged = merge_3way([(acc_s, 'self'), (acc_c, 'cross_opensource'), (acc_a, 'cross_anomsim')])
 
         acc_self_avg = float(acc_s['accuracy'].mean()) if not acc_s.empty else None
+        acc_self_best_avg = float(acc_s_best['accuracy'].mean()) if not acc_s_best.empty else None
         acc_cross_row = acc_cross_summary[acc_cross_summary['dataset'] == dataset] if not acc_cross_summary.empty else pd.DataFrame()
         acc_cross_avg = float(acc_cross_row['accuracy'].iloc[0]) if not acc_cross_row.empty else None
         acc_anomsim_row = acc_anomsim_summary[acc_anomsim_summary['dataset'] == dataset] if not acc_anomsim_summary.empty else pd.DataFrame()
@@ -174,6 +198,7 @@ def build_results(run_name, exp_dir):
             n_entities_cross_anomsim=int(acc_anomsim_row['n_entities'].iloc[0]) if not acc_anomsim_row.empty else 0,
             n_entities_total_possible=DATASET_TOTAL[dataset],
             self_accuracy_avg=acc_self_avg,
+            self_accuracy_best_avg=acc_self_best_avg,
             cross_opensource_accuracy_avg=acc_cross_avg,
             cross_anomsim_accuracy_avg=acc_anomsim_avg,
             gap_self_vs_cross_opensource=(acc_self_avg - acc_cross_avg)
@@ -185,6 +210,8 @@ def build_results(run_name, exp_dir):
         out_path = os.path.join(results_dir, f'{out_name}_results.xlsx')
         with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
             acc_s.to_excel(writer, sheet_name='Self', index=False)
+            acc_s_all_seeds.to_excel(writer, sheet_name='Self (All Seeds)', index=False)
+            acc_s_best.to_excel(writer, sheet_name='Self (Best Seed)', index=False)
             acc_c.to_excel(writer, sheet_name='Cross-OpenSource', index=False)
             acc_a.to_excel(writer, sheet_name='Cross-AnomSim', index=False)
             acc_merged.to_excel(writer, sheet_name='Per-Entity Comparison', index=False)
