@@ -17,12 +17,21 @@ scripts/organize_experiment1.py, just scored a second way. Only writes a
 short README.txt pointing back there for traceability.
 
 Reads (all already produced by existing scripts, no new CSVs here):
-  full_reproduction_metrics.csv / _summary.csv       (Self)
+  full_reproduction_metrics.csv / _raw.csv / _summary.csv  (Self)
   full_cross_domain_metrics.csv / _summary.csv / _vs_self.csv  (Cross-OpenSource)
   simulation_cross_domain_metrics.csv / _summary.csv (Cross-AnomSim -- produced
     separately by scripts/simulation_cross_domain_metrics.py --sim_model_dir
     <cross_anomsim checkpoint>, since that model lives in the sibling
     Core-Clustering repo)
+
+Self is the only leg trained across multiple seeds (0-4, matching the
+paper's "average results of five runs" methodology -- see
+full_reproduction_metrics.py). The `Self` sheet is the entity-level average
+across whatever seeds are done so far; a separate `Self (All Seeds)` sheet
+(long format: one row per entity+seed) exposes the individual per-seed
+values underneath that average, straight from full_reproduction_metrics_raw.csv.
+Cross-OpenSource/Cross-AnomSim are single-seed pooled models, so they have
+no per-seed breakdown to show.
 
 Safe to rerun any time: always freshly rewrites the Excel workbooks from
 whatever's currently in the source CSVs.
@@ -56,6 +65,7 @@ def build_results(run_name, exp_dir):
 
     base = f'./result/{run_name}'
     self_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics.csv')
+    self_raw_df = _read_csv_if_exists(f'{base}/full_reproduction_metrics_raw.csv')
     self_summary = _read_csv_if_exists(f'{base}/full_reproduction_metrics_summary.csv')
     cross_df = _read_csv_if_exists(f'{base}/full_cross_domain_metrics.csv')
     cross_summary = _read_csv_if_exists(f'{base}/full_cross_domain_metrics_summary.csv')
@@ -66,6 +76,9 @@ def build_results(run_name, exp_dir):
     for dataset, out_name in DATASET_OUT_NAME.items():
         drop = [] if dataset == 'anomaly_archive' else ['peak_in_range']
         s = _filter(self_df, dataset, drop_cols=drop)
+        s_all_seeds = _filter(self_raw_df, dataset, drop_cols=drop)
+        if not s_all_seeds.empty:
+            s_all_seeds = s_all_seeds.sort_values(['entity', 'seed'])
         c = _filter(cross_df, dataset, drop_cols=drop)
         a = _filter(anomsim_df, dataset, drop_cols=drop)
         merged = merge_3way([(s, 'self'), (c, 'cross_opensource'), (a, 'cross_anomsim')])
@@ -78,6 +91,7 @@ def build_results(run_name, exp_dir):
         out_path = os.path.join(results_dir, f'{out_name}_results.xlsx')
         with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
             s.to_excel(writer, sheet_name='Self', index=False)
+            s_all_seeds.to_excel(writer, sheet_name='Self (All Seeds)', index=False)
             c.to_excel(writer, sheet_name='Cross-OpenSource', index=False)
             a.to_excel(writer, sheet_name='Cross-AnomSim', index=False)
             merged.to_excel(writer, sheet_name='Per-Entity Comparison', index=False)
@@ -86,7 +100,8 @@ def build_results(run_name, exp_dir):
             asum.to_excel(writer, sheet_name='Summary', index=False, startrow=len(ss) + 2 + len(cs) + 2)
             vs.to_excel(writer, sheet_name='Summary', index=False,
                         startrow=len(ss) + 2 + len(cs) + 2 + len(asum) + 2)
-        print(f'Wrote {out_path} (self={len(s)}, cross-opensource={len(c)}, cross-anomsim={len(a)})')
+        print(f'Wrote {out_path} (self={len(s)} entities, self all-seed rows={len(s_all_seeds)}, '
+              f'cross-opensource={len(c)}, cross-anomsim={len(a)})')
 
     readme_path = os.path.join(results_dir, 'README.txt')
     if not os.path.isfile(readme_path):
