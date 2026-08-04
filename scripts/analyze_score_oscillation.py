@@ -59,6 +59,12 @@ script is not modified; this one just calls the same function again (a
 modest amount of redundant inference, but keeps DS_1 untouched).
 
 Resumable: entities already in the output CSV are skipped unless --force.
+
+--shard_index/--num_shards let this run as one of several concurrent
+processes over disjoint slices of the entity list (index % num_shards ==
+shard_index) -- see scripts/run_score_oscillation_parallel.py, which
+launches all shards and merges their separate --out_csv files back
+together. Not meant to be set by hand; the orchestrator sets them.
 """
 import argparse
 import os
@@ -163,6 +169,11 @@ def run():
                          help='Defaults to ./result/Experiment_1/Models/Cross-AnomSim/{seed}')
     parser.add_argument('--out_csv', default='./result/DS_2/oscillation/oscillation_metrics.csv')
     parser.add_argument('--force', action='store_true')
+    parser.add_argument('--shard_index', type=int, default=0,
+                         help='Process only entities where index %% num_shards == shard_index -- lets '
+                              'run_score_oscillation_parallel.py split the full entity list across '
+                              'several concurrent processes. Default 0 with num_shards=1 processes everything.')
+    parser.add_argument('--num_shards', type=int, default=1)
     args = parser.parse_args()
 
     cross_anomsim_model_dir = args.cross_anomsim_model_dir or f'./result/Experiment_1/Models/Cross-AnomSim/{args.seed}'
@@ -178,6 +189,10 @@ def run():
     else:
         entities = frm.discover_dataset_entities(args.run_name, DATASET)
         print(f'{len(entities)} entities discovered for {DATASET} (run_name={args.run_name})')
+
+    if args.num_shards > 1:
+        entities = [e for i, e in enumerate(entities) if i % args.num_shards == args.shard_index]
+        print(f'Shard {args.shard_index}/{args.num_shards}: {len(entities)} entities assigned')
 
     out_dir = os.path.dirname(args.out_csv)
     if out_dir:
