@@ -125,6 +125,17 @@ def analyze_entity(run_name, entity, seed, params, device, cross_anomsim_model_d
         # score sitting in a compressed band away from 0/1 (see mse_ce_corr).
         row[f'{model_name}_numerator'] = anomaly_mean - normal_mean
         row[f'{model_name}_vus_roc'] = curves[model_name]['metrics']['VUS_ROC']
+        # Exact linear decomposition of the two numbers above: blended_score =
+        # (mse_score + ce_score) / 2, and mean() is linear, so
+        # normal_mean == 0.5*(mse_normal_mean + ce_normal_mean) exactly (not an
+        # approximation) -- lets us attribute the gap to reconstruction-error
+        # vs classifier-confidence separately.
+        for comp_name, comp_score in [('mse', mse_score), ('ce', ce_score)]:
+            comp_normal_mean = float(np.mean(comp_score[normal_mask]))
+            comp_anomaly_mean = float(np.mean(comp_score[anomaly_mask]))
+            row[f'{model_name}_{comp_name}_normal_mean'] = comp_normal_mean
+            row[f'{model_name}_{comp_name}_anomaly_mean'] = comp_anomaly_mean
+            row[f'{model_name}_{comp_name}_numerator'] = comp_anomaly_mean - comp_normal_mean
         # Synchronization: do the two raw components (reconstruction-error-
         # based vs classifier-based) rise/fall at the same timesteps? Each is
         # independently min-max'd to touch 0 and 1 somewhere (see
