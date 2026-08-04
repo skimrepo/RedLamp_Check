@@ -131,7 +131,8 @@ def plot_score_comparison(entity, ucr_meta, curves, save_path, context=1000):
     end = min(total_len, anomaly_end + context)
     x = np.arange(start, end)
 
-    colors = {'self': '#3f7fbf', 'cross_opensource': '#e0883f', 'cross_anomsim': '#3fae59'}
+    colors = {'self': '#3f7fbf', 'cross_opensource': '#e0883f', 'cross_anomsim': '#3fae59',
+              'reference_distance': '#9b59b6'}
 
     fig, (ax_raw, ax_score) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
     ax_raw.plot(x, any_result['raw_series'][start:end], color='#888888', linewidth=1.0)

@@ -74,7 +74,11 @@ def _min_distance_to_reference(test_windows, reference_windows, chunk_size=5000)
     return out
 
 
-def score_entity_reference_distance(run_name, entity, seed, max_reference_windows, rng):
+def score_entity_reference_distance(run_name, entity, seed, max_reference_windows, rng, include_curves=False):
+    """include_curves=True additionally returns 'score'/'real_labels'/'raw_series'
+    (same shape as full_reproduction_metrics.score_entity's own include_curves
+    option) so callers can plot this alongside Self/Cross-OpenSource/
+    Cross-AnomSim's curves without any special-casing."""
     _, disk_cfg = ci.discover_entity(run_name, DATASET, entity, seed)
     dataparams = ci.build_dataparams(DATASET, entity, CFG, disk_cfg)
 
@@ -115,6 +119,11 @@ def score_entity_reference_distance(run_name, entity, seed, max_reference_window
     anomaly_idxs = np.where(real_labels == 1)[0]
     peak_idx = int(np.argmax(dist_score))
     peak_in_range = int(anomaly_idxs.min() <= peak_idx <= anomaly_idxs.max())
+
+    if include_curves:
+        raw_series = np.concatenate([np.zeros(window_size - 1), test_windows[:, -1]])
+        return dict(metrics=metrics, peak_in_range=peak_in_range,
+                    score=dist_score, real_labels=real_labels, raw_series=raw_series)
     return dict(metrics=metrics, peak_in_range=peak_in_range)
 
 
