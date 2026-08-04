@@ -108,7 +108,14 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
     real_labels = real_ground_truth_labels(dataset, real_name)
 
     inputs, prediction, anomaly_mask, label, pred_label, pred_enc = main.test(test_dl, model_dir, params, device)
-    score = main.anomaly_scoreing(inputs, prediction, pred_label)
+    if include_curves:
+        # mse_score/ce_score: the two independently min-max-normalized halves
+        # anomaly_scoreing() averages together -- if they don't peak/trough at
+        # the same timesteps, the blended score never reaches close to 0 or 1
+        # (see analyze_score_oscillation.py, which checks exactly this).
+        score, mse_score, ce_score = main.anomaly_scoreing(inputs, prediction, pred_label, return_components=True)
+    else:
+        score = main.anomaly_scoreing(inputs, prediction, pred_label)
     _, window_size, _ = inputs.shape
     score = np.concatenate([np.zeros(window_size - 1), score])
 
@@ -147,6 +154,8 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
         result['score'] = score
         result['real_labels'] = real_labels
         result['raw_series'] = raw_series
+        result['mse_score'] = np.concatenate([np.zeros(window_size - 1), mse_score])
+        result['ce_score'] = np.concatenate([np.zeros(window_size - 1), ce_score])
     return result
 
 

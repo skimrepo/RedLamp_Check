@@ -394,7 +394,7 @@ def label_score_selected_feature(label, axis=[0]):
     label_copy = np.sum(label_copy,axis=1)
     return label_copy
 
-def anomaly_scoreing(input, pred, pred_label, threshold=0.05):
+def anomaly_scoreing(input, pred, pred_label, threshold=0.05, return_components=False):
     B,W,D = input.shape
     input = input.reshape(B, -1)
     pred = pred.reshape(B, -1)
@@ -408,6 +408,12 @@ def anomaly_scoreing(input, pred, pred_label, threshold=0.05):
     ce_score = convolve_minmax_score(ce_score, w=int(W/2))
 
     anomaly_score = (mse_score + ce_score)/2
+    # mse_score/ce_score are EACH independently min-max normalized to [0,1],
+    # then averaged -- if the two don't peak/trough at the same timesteps,
+    # the blended anomaly_score never actually reaches close to 0 or 1
+    # (needs return_components to diagnose that from outside this function).
+    if return_components:
+        return anomaly_score, mse_score, ce_score
     return anomaly_score
 
 

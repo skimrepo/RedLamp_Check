@@ -15,11 +15,38 @@ timesteps where real_labels == 0, i.e. excluding the real anomaly window):
     reacting to how much the raw signal happens to be changing right now,
     regardless of whether that change is actually anomalous.
 
-Prediction (see plan): if this is a universal Cross-AnomSim limitation
-(not something specific to "bad" entities), cross_anomsim's numbers here
-should look similarly elevated across BOTH the exp2_bad and exp2_good
-groups -- what actually differs between those groups is Self's own
-achievability (already shown separately), not this oscillation mechanism.
+Measured result (already run once): score_std_normal turned out to be
+similar for both models AND similar across bad/good groups -- ruling out
+"whoever has less baseline noise wins" as too-simple an explanation. But a
+closer look at DS_1's score_comparison.png plots showed WHY that comparison
+was incomplete: Cross-AnomSim's score sits in a compressed band (e.g.
+0.2-0.68 for entity 040) that never approaches 0 or 1, while Self's spans
+close to the full range -- despite both being min-max normalized. This adds
+the diagnostics needed to explain that and pin down what actually drives
+VUS_ROC, still restricted to the same curves already being computed here:
+  - self_score_min_normal / _max_normal: the actual normal-period operating
+    band (directly shows the compression std alone couldn't reveal)
+  - self_numerator / cross_anomsim_numerator: anomaly-period score mean
+    minus this SAME model's own normal-period mean -- a within-model
+    comparison, so it isn't distorted by which band a model's score happens
+    to occupy
+  - self_vus_roc / cross_anomsim_vus_roc: pulled straight from
+    score_entity's own metrics dict, to correlate directly against the
+    numerator above
+  - self_mse_ce_corr / cross_anomsim_mse_ce_corr: correlation between the
+    two raw score components (mse_score, ce_score -- each independently
+    min-max'd before being averaged into the final score, see
+    main.anomaly_scoreing). If they don't rise/fall together, their average
+    gets compressed away from 0/1 regardless of true precision -- this
+    tests whether THAT desynchronization is what compresses Cross-AnomSim's
+    band on hard entities specifically.
+
+Prediction: cross_anomsim_numerator should vary a lot across entities (and
+correlate strongly with cross_anomsim_vus_roc), driven by whether the real
+anomaly happens to coincide with a local-activity spike its score reacts
+to -- while self_numerator should be reliably large regardless. And
+cross_anomsim_mse_ce_corr should be lower (more desynchronized) on
+exp2_bad entities than exp2_good ones, explaining the band compression.
 
 Reuses full_reproduction_metrics.score_entity(include_curves=True) exactly
 as DS_1's analyze_ds1_gap_entities.py does for score_comparison.png -- that
@@ -72,6 +99,7 @@ def analyze_entity(run_name, entity, seed, params, device, cross_anomsim_model_d
 
     real_labels = curves['self']['real_labels']
     normal_mask = real_labels == 0
+    anomaly_mask = ~normal_mask
     raw_series = curves['self']['raw_series']
 
     activity = local_activity(raw_series, window_size)
@@ -79,8 +107,31 @@ def analyze_entity(run_name, entity, seed, params, device, cross_anomsim_model_d
     row = dict(entity=entity)
     for model_name in ['self', 'cross_anomsim']:
         score = curves[model_name]['score']
+        mse_score = curves[model_name]['mse_score']
+        ce_score = curves[model_name]['ce_score']
+
+        normal_mean = float(np.mean(score[normal_mask]))
+        anomaly_mean = float(np.mean(score[anomaly_mask]))
+
         row[f'{model_name}_score_std_normal'] = float(np.std(score[normal_mask]))
+        row[f'{model_name}_score_min_normal'] = float(np.min(score[normal_mask]))
+        row[f'{model_name}_score_max_normal'] = float(np.max(score[normal_mask]))
         row[f'{model_name}_corr_with_activity'] = safe_corr(score[normal_mask], activity[normal_mask])
+        row[f'{model_name}_normal_score_mean'] = normal_mean
+        row[f'{model_name}_anomaly_score_mean'] = anomaly_mean
+        # The "numerator": how much the score actually rises during the true
+        # anomaly relative to this SAME model's own normal-period baseline --
+        # a within-model comparison, so it's not distorted by one model's
+        # score sitting in a compressed band away from 0/1 (see mse_ce_corr).
+        row[f'{model_name}_numerator'] = anomaly_mean - normal_mean
+        row[f'{model_name}_vus_roc'] = curves[model_name]['metrics']['VUS_ROC']
+        # Synchronization: do the two raw components (reconstruction-error-
+        # based vs classifier-based) rise/fall at the same timesteps? Each is
+        # independently min-max'd to touch 0 and 1 somewhere (see
+        # main.anomaly_scoreing) -- if they're desynchronized, their average
+        # (the final score) never gets close to 0 or 1, compressing the
+        # entire operating band regardless of "true" precision.
+        row[f'{model_name}_mse_ce_corr'] = safe_corr(mse_score, ce_score)
     return row
 
 
