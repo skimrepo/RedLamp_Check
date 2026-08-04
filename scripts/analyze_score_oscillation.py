@@ -4,7 +4,12 @@ DS_1's "achievability" finding -- see plot_self_vs_cross_anomsim_scatter.py):
 does Cross-AnomSim's anomaly score oscillate with the raw signal's own local
 activity even during NORMAL (non-anomalous) periods, unlike Self's?
 
-For each of DS_1's 46 gap-selected entities, computes (restricted to
+By default, runs over every UCR (anomaly_archive) entity discovered for
+--run_name (~247) -- not just DS_1's gap-selected 46 -- so downstream
+analysis can bucket entities into bad/good purely by Experiment_2's own
+VUS_ROC gap threshold, with no Experiment_1/accuracy-based grouping and no
+top-n cap (pass --entity_metadata_csv to restrict to a specific list
+instead, e.g. DS_1's 46). For each entity, computes (restricted to
 timesteps where real_labels == 0, i.e. excluding the real anomaly window):
   - self_score_std_normal / cross_anomsim_score_std_normal: how much each
     model's score oscillates during normal periods (should be near-flat/low
@@ -151,7 +156,9 @@ def run():
     parser.add_argument('--run_name', default='test')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--entity_metadata_csv', default='./result/DS_1/entity_metadata.csv')
+    parser.add_argument('--entity_metadata_csv', default=None,
+                         help='If set, restricts to this entity list (e.g. DS_1\'s gap-selected 46). '
+                              'Default: every UCR entity discovered for --run_name (all ~247).')
     parser.add_argument('--cross_anomsim_model_dir', default=None,
                          help='Defaults to ./result/Experiment_1/Models/Cross-AnomSim/{seed}')
     parser.add_argument('--out_csv', default='./result/DS_2/oscillation/oscillation_metrics.csv')
@@ -165,8 +172,12 @@ def run():
     params = utils.AttrDict(seed=args.seed)
     params.override(main.model_parameters(model_args))
 
-    entities = pd.read_csv(args.entity_metadata_csv)['entity'].astype(str).str.zfill(3).tolist()
-    print(f'{len(entities)} entities loaded from {args.entity_metadata_csv}')
+    if args.entity_metadata_csv:
+        entities = pd.read_csv(args.entity_metadata_csv)['entity'].astype(str).str.zfill(3).tolist()
+        print(f'{len(entities)} entities loaded from {args.entity_metadata_csv}')
+    else:
+        entities = frm.discover_dataset_entities(args.run_name, DATASET)
+        print(f'{len(entities)} entities discovered for {DATASET} (run_name={args.run_name})')
 
     out_dir = os.path.dirname(args.out_csv)
     if out_dir:
