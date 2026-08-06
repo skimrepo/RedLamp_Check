@@ -188,19 +188,39 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
     pages, 2 for Self+Cross-AnomSim overlay on Test pages).
     real_anomaly_spans: optional list of (start, end) to shade in every panel.
 
-    5 panels: raw+reconstruction, raw (pre-normalization) MSE ["panel 1.5",
-    free y-axis], MSE score, CE score, Anomaly score. The last three are
-    each independently min-max normalized to [0,1] by construction (see
-    main.anomaly_scoreing/convolve_minmax_score), so their y-axis is fixed
-    to [0,1] for comparability across pages -- only panel 1.5 (raw MSE,
-    never normalized) gets a free y-axis."""
+    6 panels, in order:
+      1.    raw signal (context/focus) + reconstruction
+      1.25  |raw - reconstruction|, pointwise -- no windowing, no smoothing,
+            no normalization; the most literal "how far off is it right
+            here" view, free y-axis.
+      1.5   MSE (raw): main.mse()'s own per-window mean squared error,
+            BEFORE convolve_minmax_score's smoothing (box-convolution,
+            width window_size/2) and [0,1] normalization -- free y-axis.
+            This will generally look smoother than panel 1.25 (it's a
+            per-window average, not per-point) but is still the
+            pre-smoothing/pre-normalization value.
+      2-4.  MSE_Norm_Smooth / CE_Norm_Smooth / Anomaly_Norm_Smooth scores --
+            exactly mse_score/ce_score/score from main.anomaly_scoreing,
+            i.e. panel 1.5 (or its CE-side equivalent) run through
+            convolve_minmax_score. Each is independently min-max normalized
+            to [0,1] over the WHOLE entity/split (not just this local
+            display slice), so a flat-looking curve here doesn't mean flat
+            raw error -- it means this local slice sits in a narrow part of
+            that entity's own full min-max range (compare against panel
+            1.25/1.5 for the unnormalized picture). Smoothing also changes
+            the shape, not just the scale, versus panels 1.25/1.5 -- it's a
+            literal box-convolution low-pass filter, so sharp local spikes
+            get attenuated/widened. Fixed y-axis [0,1] for comparability
+            across pages."""
     total_len = len(raw_series)
     d0, d1 = display_bounds(focus_start, focus_end, window_size, total_len)
     x = np.arange(d0, d1)
     raw_slice = raw_series[d0:d1]
     in_focus = (x >= focus_start) & (x < focus_end)
 
-    fig, (ax_raw, ax_mse_raw, ax_mse, ax_ce, ax_score) = plt.subplots(5, 1, figsize=(11, 12), sharex=True)
+    fig, (ax_raw, ax_abs_err, ax_mse_raw, ax_mse, ax_ce, ax_score) = plt.subplots(
+        6, 1, figsize=(11, 14), sharex=True)
+    all_axes = (ax_raw, ax_abs_err, ax_mse_raw, ax_mse, ax_ce, ax_score)
 
     # Draw the FULL context line first (one continuous segment, no gaps),
     # then overlay just the focus span in its own color on top -- masking
@@ -220,12 +240,18 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
 
     for i, s in enumerate(series_list):
         color = s.get('color', recon_colors[i % len(recon_colors)])
+        abs_err = np.abs(raw_slice - s['reconstruction'][d0:d1])
+        ax_abs_err.plot(x, abs_err, color=color, linewidth=1.1, alpha=0.9, label=s['label'])
+    ax_abs_err.set_ylabel('|raw - reconstruction|')
+
+    for i, s in enumerate(series_list):
+        color = s.get('color', recon_colors[i % len(recon_colors)])
         ax_mse_raw.plot(x, s['mse_raw'][d0:d1], color=color, linewidth=1.1, alpha=0.9, label=s['label'])
     ax_mse_raw.set_ylabel('MSE (raw)')
 
-    for ax, key, ylabel in [(ax_mse, 'mse_score', 'MSE score'),
-                             (ax_ce, 'ce_score', 'CE score'),
-                             (ax_score, 'score', 'Anomaly score')]:
+    for ax, key, ylabel in [(ax_mse, 'mse_score', 'MSE_Norm_Smooth score'),
+                             (ax_ce, 'ce_score', 'CE_Norm_Smooth score'),
+                             (ax_score, 'score', 'Anomaly_Norm_Smooth score')]:
         for i, s in enumerate(series_list):
             color = s.get('color', recon_colors[i % len(recon_colors)])
             ax.plot(x, s[key][d0:d1], color=color, linewidth=1.1, alpha=0.9, label=s['label'])
@@ -233,12 +259,13 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
         ax.set_ylim(0, 1)
 
     for span_start, span_end in (real_anomaly_spans or []):
-        for ax in (ax_raw, ax_mse_raw, ax_mse, ax_ce, ax_score):
+        for ax in all_axes:
             ax.axvspan(span_start, span_end, color='#e34948', alpha=0.15)
 
-    for ax in (ax_raw, ax_mse_raw, ax_mse, ax_ce, ax_score):
+    for ax in all_axes:
         ax.legend(fontsize=7, loc='upper right')
-    ax_score.set_xlabel('timestep')
+        ax.set_xlabel('timestep')
+        ax.tick_params(labelbottom=True)  # sharex hides tick labels on non-bottom axes by default
     fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     pdf.savefig(fig)
