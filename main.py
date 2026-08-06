@@ -184,7 +184,7 @@ class REDLAMP:
 
 def test(test_dataloader, model_dir, params, device):
     model = ConvAEC(params).to(device)
-    model.load_state_dict(torch.load(f'{model_dir}/bestmodel.pkl'))
+    model.load_state_dict(torch.load(f'{model_dir}/bestmodel.pkl', map_location=device))
 
     inputs_list = []
     prediction_list = []
@@ -231,7 +231,7 @@ def test(test_dataloader, model_dir, params, device):
 
 def extract_embeddings(model_dir, params, device, val_dataloader, max_samples=2000):
     model = ConvAEC(params).to(device)
-    model.load_state_dict(torch.load(f'{model_dir}/bestmodel.pkl'))
+    model.load_state_dict(torch.load(f'{model_dir}/bestmodel.pkl', map_location=device))
     model.eval()
 
     embeddings_list, class_idx_list = [], []

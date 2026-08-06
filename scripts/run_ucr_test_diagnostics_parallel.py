@@ -10,6 +10,12 @@ covering disjoint entities; open whichever you need, or merge them
 yourself later if you want one file (not done here -- no PDF-merging
 dependency in this repo).
 
+build_ucr_test_diagnostics.py runs on CPU (no --gpu here) -- with many
+concurrent shards it previously defaulted every shard onto the same GPU,
+each grabbing its own CUDA context, which reliably OOM'd a shared/already
+-busy GPU past a handful of shards. Inference here is lightweight, so CPU
+is both simpler and safe to fan out widely.
+
 Each shard's PyTorch defaults to using EVERY core on the machine for its
 own intra-op threading (OMP/MKL), so N shards launched with a bare
 subprocess.Popen would have N processes all fighting over all cores at
@@ -39,7 +45,6 @@ def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=8)
     parser.add_argument('--cross_anomsim_model_dir', default=None)
     parser.add_argument('--out_pdf', default='./result/DS_3/test_diagnostics/UCR_Test_anomaly_inference_samples.pdf')
@@ -58,7 +63,7 @@ def run():
     procs = []
     for i in range(args.num_shards):
         cmd = [sys.executable, SCRIPT_PATH,
-               '--run_name', args.run_name, '--seed', str(args.seed), '--gpu', str(args.gpu),
+               '--run_name', args.run_name, '--seed', str(args.seed),
                '--shard_index', str(i), '--num_shards', str(args.num_shards),
                '--out_pdf', args.out_pdf, '--cache_dir', args.cache_dir]
         if args.cross_anomsim_model_dir:

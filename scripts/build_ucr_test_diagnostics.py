@@ -24,6 +24,14 @@ unchanged (already does the dense window_step=1 pass over test_all) --
 called once per entity per model (Self, Cross-AnomSim), not once per
 position, and cached to .npz.
 
+Runs on CPU (matching build_self_train_val_diagnostics.py and
+build_anomsim_train_val_diagnostics.py) rather than GPU -- ConvAEC
+inference here is lightweight, and launching --num_shards concurrent
+processes that each grab a CUDA context on a GPU shared with other jobs
+reliably OOMs once num_shards gets past a handful (each process's context
+alone can be several hundred MB, on top of whatever memory other jobs on
+the box are already holding).
+
 Supports --shard_index/--num_shards (writes one PDF per shard,
 "..._shard{i}.pdf") for splitting the ~250-entity sweep across concurrent
 processes if a single-process run turns out too slow in practice.
@@ -32,6 +40,7 @@ import argparse
 import os
 import sys
 
+import torch
 from matplotlib.backends.backend_pdf import PdfPages
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,7 +75,6 @@ def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--cross_anomsim_model_dir', default=None,
                          help='Defaults to ./result/Experiment_1/Models/Cross-AnomSim/{seed}')
     parser.add_argument('--out_pdf', default='./result/DS_3/test_diagnostics/UCR_Test_anomaly_inference_samples.pdf')
@@ -77,7 +85,7 @@ def run():
     args = parser.parse_args()
 
     cross_anomsim_model_dir = args.cross_anomsim_model_dir or f'./result/Experiment_1/Models/Cross-AnomSim/{args.seed}'
-    device = utils.init_dl_program(args.gpu, seed=args.seed)
+    device = torch.device('cpu')
     model_args = ci.build_model_args(dg.CFG, cps.WINDOW_SIZE)
     params = utils.AttrDict(seed=args.seed)
     params.override(main.model_parameters(model_args))
