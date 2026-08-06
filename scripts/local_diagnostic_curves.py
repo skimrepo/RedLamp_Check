@@ -263,6 +263,11 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
             ax.axvspan(span_start, span_end, color='#e34948', alpha=0.15)
 
     for ax in all_axes:
+        # axvspan's rectangle is included in autoscale, so a real_anomaly_span
+        # far outside [d0, d1) would otherwise stretch the x-axis to cover
+        # both it and the focus window, squeezing the actual displayed curves
+        # into a sliver -- pin the range back to the intended display window.
+        ax.set_xlim(d0, d1)
         ax.legend(fontsize=7, loc='upper right')
         ax.set_xlabel('timestep')
         ax.tick_params(labelbottom=True)  # sharex hides tick labels on non-bottom axes by default
