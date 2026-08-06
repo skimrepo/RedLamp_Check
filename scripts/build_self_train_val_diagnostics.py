@@ -5,16 +5,30 @@ Anomaly score, all four already-existing quantities from
 main.anomaly_scoreing, just visualized over train/val splits instead of
 only test).
 
+Each of the N_SAMPLES pages per (entity, split, type) is its own small,
+self-contained local experiment: pick ONE focus window position on the
+entity's real timeline, build a chunk of that window plus 2*window_size of
+REAL (untouched) context on each side, inject ONE fresh random instance of
+the anomaly type into ONLY the focus sub-range (context stays real data),
+then run a dense window_step=1 pass over just that small chunk and read off
+reconstruction/mse_score/ce_score/score exactly as full_reproduction_metrics
+always has (last-timestep-of-window alignment) -- see
+local_diagnostic_curves.build_local_chunk/dense_windows_from_chunk. This
+replaces the earlier design (independently re-injecting into EVERY window of
+a whole-split dense pass), which made every window in view carry its own
+anomaly and made mse_score/ce_score/score's [0,1] normalization span the
+entire split rather than just what's shown on the page.
+
+Injection reuses loaders.loader_aug.Loader_aug.select_anomalies (the exact
+per-type logic used everywhere else) via a lightweight instance that skips
+its normal __init__ (which would eagerly dense-inject the whole entity --
+exactly what's being avoided here).
+
 Covers EVERY UCR entity discovered for --run_name (not a sample) -- one PDF
 PER ENTITY per split (Self_Train_{entity}.pdf, Self_Val_{entity}.pdf), each
-with 12 sections (Normal + 11 injected types) x 5 pages. The 5 pages per
-section show 5 DIFFERENT display windows of the SAME already-computed
-dense curve (see pick_sample_positions) -- dense window_step=1 injection
-draws an independent random instance of that type at every window
-position, so different positions genuinely show different injected
-samples, not just different crops of one instance. Inference itself is
-only ever run once per (entity, split, type) and cached to .npz; the 5
-pages are free reslicing of that same cached curve.
+with 12 sections (Normal + 11 injected types) x N_SAMPLES pages. Each
+(entity, split, type, sample) combo is cached to its own .npz (small: only
+~5*window_size points of inference each).
 
 --shard_index/--num_shards split the ENTITY list across concurrent
 processes (see run_self_train_val_diagnostics_parallel.py) -- since output
@@ -25,6 +39,7 @@ import argparse
 import os
 import sys
 
+import numpy as np
 import torch
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -45,24 +60,38 @@ N_SAMPLES = 5
 
 
 def load_entity_datasets(entity, disk_cfg):
-    """(train_dataset, val_dataset) loaded once per entity -- callers build
-    a fresh Loader_aug per (split, type) from these (injection differs by
-    type and can't be cached, but there's no need to re-read the entity's
-    raw data off disk for every type)."""
+    """(train_dataset, val_dataset) loaded once per entity -- the real Y
+    array each split's window positions/injections are drawn from."""
     return load_data(dataset=DATASET, group='train', entities=entity, downsampling=disk_cfg['downsampling'],
                       min_length=None, root_dir='./dataset', verbose=False, validation=True)
 
 
-def windows_for_type(train_dataset, val_dataset, split, anomaly_type, disk_cfg):
-    dataset = train_dataset if split == 'train' else val_dataset
-    loader = Loader_aug(
-        dataset=dataset, batch_size=disk_cfg['batch_size'], window_size=disk_cfg['window_size'],
-        window_step=1, anomaly_types=[anomaly_type], anomaly_types_for_dict=ci.ANOMALY_TYPES,
-        min_range=1, min_features=dg.CFG['min_features'], max_features=dg.CFG['max_features'],
-        fast_sampling=False, shuffle=False, verbose=False)
-    # (n_windows, n_features, window_size) -> (n_windows, window_size, n_features), matching
-    # main.test()'s own transpose convention for batch['Y'].
-    return loader.Y_windows.transpose(2, 1)
+def make_injector(window_size):
+    """A Loader_aug instance with __init__ bypassed (via __new__) -- its own
+    __init__ would eagerly dense-inject anomalies into every window of the
+    whole entity, which is exactly the whole-split behavior this script no
+    longer wants. select_anomalies/_inject_* only ever read window_size,
+    min_range, min_features, max_features, fast_sampling off self, so
+    setting just those by hand is enough to reuse the exact same per-type
+    injection code for a single, arbitrary window."""
+    loader = Loader_aug.__new__(Loader_aug)
+    loader.window_size = window_size
+    loader.min_range = 1
+    loader.min_features = dg.CFG['min_features']
+    loader.max_features = dg.CFG['max_features']
+    loader.fast_sampling = False
+    return loader
+
+
+def inject_fn_for(injector, anomaly_type):
+    """build_local_chunk's inject_fn(window) -> (injected, mask) contract,
+    bound to one anomaly type. 'normal' works through the same call --
+    select_anomalies returns the window unmodified with an all-ones mask, so
+    no special-casing is needed."""
+    def inject(window):
+        y_temp, _z_temp, mask_temp = injector.select_anomalies(anomaly_type, window, 0, window.shape[1])
+        return np.asarray(y_temp), np.asarray(mask_temp)
+    return inject
 
 
 def run():
@@ -95,44 +124,86 @@ def run():
             print(f'[skip] {entity}: no trained model found')
             continue
         window_size = disk_cfg['window_size']
+        injector = make_injector(window_size)
 
-        needed_types = [t for t in TYPES for split in ['train', 'val']
-                         if args.force or not os.path.isfile(os.path.join(args.cache_dir, f'{entity}_{split}_{t}.npz'))]
+        cache_path = lambda split, t, i: os.path.join(args.cache_dir, f'{entity}_{split}_{t}_s{i}.npz')
+        any_missing = args.force or any(
+            not os.path.isfile(cache_path(split, t, i))
+            for split in ('train', 'val') for t in TYPES for i in range(1, N_SAMPLES + 1))
+
         model = None
         train_dataset = val_dataset = None
-        if needed_types:
+        if any_missing:
             model = ldc.load_convaec_model(model_dir, params, device)
             train_dataset, val_dataset = load_entity_datasets(entity, disk_cfg)
 
-        curves_by_split_type = {}
-        for split in ['train', 'val']:
+        curves_by_key = {}
+        for split in ('train', 'val'):
+            dataset = train_dataset if split == 'train' else val_dataset
+            positions = Y = None
+            if dataset is not None:
+                if len(dataset.entities) == 0 or dataset.entities[0].n_time < window_size:
+                    print(f'[skip] {entity}/{split}: empty/too-short split')
+                    continue  # nothing cached under this run's dataset could be salvaged either
+                entity_obj = dataset.entities[0]
+                Y, n_time = entity_obj.Y, entity_obj.n_time
+                positions = ldc.pick_sample_positions(n_time, window_size, n=N_SAMPLES)
+            # else: dataset wasn't loaded because every (type, sample) cache file for this
+            # split already existed (any_missing was False) -- positions/Y stay None, but
+            # get_or_compute_curves below will hit the cache and never call compute().
+
+            # Gather every (type, sample) combo that needs computing this run, build
+            # ALL their local chunks first, then run ONE batched model forward pass
+            # across the lot (up to 12*N_SAMPLES chunks) instead of a separate model()
+            # call per combo -- anomaly_scoreing/mse still run per-chunk afterward
+            # (see compute_dense_curves_batch), so results are identical either way,
+            # just with far less per-call Python/dispatch overhead.
+            to_compute = []
             for anomaly_type in TYPES:
-                cache_path = os.path.join(args.cache_dir, f'{entity}_{split}_{anomaly_type}.npz')
+                for sample_i in range(1, N_SAMPLES + 1):
+                    path = cache_path(split, anomaly_type, sample_i)
+                    if args.force or not os.path.isfile(path):
+                        if positions is not None:
+                            to_compute.append((anomaly_type, sample_i, path))
+                        # else: not cached and no data to compute from -- stays unavailable
+                    else:
+                        curves_by_key[(split, anomaly_type, sample_i)] = ldc.load_curves_npz(path)
 
-                def compute():
-                    windows = windows_for_type(train_dataset, val_dataset, split, anomaly_type, disk_cfg)
-                    return ldc.compute_dense_curves(windows, model, device)
+            if to_compute:
+                windows_list, metas = [], []
+                for anomaly_type, sample_i, _path in to_compute:
+                    inject_fn = inject_fn_for(injector, anomaly_type)
+                    focus_start, focus_end = ldc.window_bounds_from_end_index(positions[sample_i - 1], window_size)
+                    chunk, local_focus_start, spans = ldc.build_local_chunk(Y, focus_start, focus_end, inject_fn)
+                    windows_list.append(ldc.dense_windows_from_chunk(chunk, window_size))
+                    metas.append((local_focus_start, spans))
 
-                curves_by_split_type[(split, anomaly_type)] = ldc.get_or_compute_curves(cache_path, compute, force=args.force)
+                batch_results = ldc.compute_dense_curves_batch(windows_list, model, device)
+                for (anomaly_type, sample_i, path), (local_focus_start, spans), curves in zip(
+                        to_compute, metas, batch_results):
+                    curves['local_focus_start'] = local_focus_start
+                    curves['anomaly_spans'] = np.array(spans, dtype=int).reshape(-1, 2)
+                    ldc.save_curves_npz(path, curves)
+                    curves_by_key[(split, anomaly_type, sample_i)] = curves
 
-        for split in ['train', 'val']:
+        for split in ('train', 'val'):
             out_path = os.path.join(args.out_dir, f'Self_{split.capitalize()}_{entity}.pdf')
             with PdfPages(out_path) as pdf:
                 for anomaly_type in TYPES:
-                    curves = curves_by_split_type[(split, anomaly_type)]
-                    if len(curves['raw_series']) == 0:
-                        print(f'[skip] {entity}/{split}/{anomaly_type}: empty split')
-                        continue
-                    positions = ldc.pick_sample_positions(len(curves['raw_series']), window_size, n=N_SAMPLES)
-                    for sample_i, center in enumerate(positions, start=1):
-                        focus_start, focus_end = ldc.window_bounds_from_end_index(center, window_size)
+                    for sample_i in range(1, N_SAMPLES + 1):
+                        curves = curves_by_key.get((split, anomaly_type, sample_i))
+                        if curves is None:
+                            continue
+                        local_focus_start = int(curves['local_focus_start'])
+                        spans = [tuple(row) for row in curves['anomaly_spans']]
                         ldc.plot_diagnostic_page(
                             pdf, curves['raw_series'],
                             [dict(label='self', reconstruction=curves['reconstruction'],
                                   mse_score=curves['mse_score'], ce_score=curves['ce_score'], score=curves['score'],
                                   mse_raw=curves['mse_raw'])],
-                            focus_start, focus_end, window_size,
-                            title=f'Self | {entity} | {anomaly_type} | {split} | sample {sample_i}/{N_SAMPLES}')
+                            local_focus_start, local_focus_start + window_size, window_size,
+                            title=f'Self | {entity} | {anomaly_type} | {split} | sample {sample_i}/{N_SAMPLES}',
+                            real_anomaly_spans=spans)
             print(f'Wrote {out_path}')
 
     print('Done.')

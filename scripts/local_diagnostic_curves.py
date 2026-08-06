@@ -6,17 +6,27 @@ and the UCR test set.
 
 Not a new metric anywhere: mse_score/ce_score/score are exactly what
 main.anomaly_scoreing() already computes for VUS-ROC/RF etc (same function,
-reused as-is). Windows overlap with window_step=1, so a single dense pass
-over an entity/split gives one mse_score/ce_score/score/reconstruction
-value per timestep once the first window_size-1 (fake, zero-padded)
-positions are skipped -- exactly full_reproduction_metrics.score_entity's
-own existing alignment convention, just reused here for train/val splits
-too (previously only used for the test split).
+reused as-is). Windows overlap with window_step=1, so a dense pass over any
+raw chunk gives one mse_score/ce_score/score/reconstruction value per
+timestep once the first window_size-1 (fake, zero-padded) positions are
+skipped -- exactly full_reproduction_metrics.score_entity's own existing
+alignment convention.
 
-Plots only ever slice a small LOCAL display range out of these full-split
-curves (one highlighted window + 2*window_size of context on each side);
-the curves themselves are always computed over the whole entity/split and
-cached to .npz so future diagnostics can reuse them without re-inference.
+Each displayed page is its own small, self-contained local experiment, not
+a slice out of one big whole-split pass: build_local_chunk carves out one
+focus window (window_size) plus 2*window_size of real context on each side,
+optionally injects a single anomaly instance into just the focus sub-range,
+and dense_windows_from_chunk turns that small chunk into the window_step=1
+window stack compute_dense_curves expects. Because mse_score/ce_score/score
+are min-max normalized inside compute_dense_curves's call to
+main.anomaly_scoreing, this normalization is now local to what's shown on
+the page (see plot_diagnostic_page's docstring) rather than spanning the
+whole entity/split -- each focus window + its context is treated as
+basically its own individual little time series, run through the model on
+its own. Position SELECTION (e.g. UCR test's real-anomaly-segment/argmax/
+argmin picks) still needs a whole-split dense pass and stays on
+full_reproduction_metrics.score_entity for that purpose; only the final
+per-page rendering is local.
 """
 import os
 
@@ -34,6 +44,27 @@ def load_convaec_model(model_dir, params, device):
     return model
 
 
+def _curves_from_model_outputs(inputs_np, predicted_np, pred_label_np, window_size):
+    """Shared tail end of compute_dense_curves/compute_dense_curves_batch --
+    everything after the model forward pass, given already-numpy outputs for
+    ONE continuous chunk (anomaly_scoreing's smoothing/normalization is only
+    correct within a single continuous window_step=1 pass)."""
+    score, mse_score, ce_score = main.anomaly_scoreing(
+        inputs_np, predicted_np, pred_label_np, return_components=True)
+    B = inputs_np.shape[0]
+    mse_raw = main.mse(inputs_np.reshape(B, -1), predicted_np.reshape(B, -1))
+
+    pad = np.zeros(window_size - 1)
+    return dict(
+        raw_series=np.concatenate([pad, inputs_np[:, -1, 0]]),
+        reconstruction=np.concatenate([pad, predicted_np[:, -1, 0]]),
+        mse_score=np.concatenate([pad, mse_score]),
+        ce_score=np.concatenate([pad, ce_score]),
+        score=np.concatenate([pad, score]),
+        mse_raw=np.concatenate([pad, mse_raw]),
+    )
+
+
 def compute_dense_curves(windows, model, device):
     """windows: torch.Tensor (n_windows, window_size, n_features), CPU,
     ordered by position with window_step=1 (consecutive windows overlap by
@@ -45,29 +76,51 @@ def compute_dense_curves(windows, model, device):
     mse_raw is the per-window reconstruction MSE BEFORE
     convolve_minmax_score's smoothing+[0,1] normalization (main.mse(),
     the same call anomaly_scoreing() makes internally before smoothing) --
-    exposed separately since mse_score's normalization is per-entity/split,
-    so its absolute scale can't be compared across pages/entities; mse_raw
-    can."""
+    exposed separately since mse_score's normalization is per-chunk (see
+    plot_diagnostic_page's docstring), so its absolute scale can't be
+    compared across pages/entities; mse_raw can."""
     with torch.no_grad():
         inputs = windows.to(device)
         predicted, pred_label, pred_enc = model(inputs)
-        inputs_np = inputs.cpu().numpy()
-        predicted_np = predicted.cpu().numpy()
-        score, mse_score, ce_score = main.anomaly_scoreing(
-            inputs_np, predicted_np, pred_label.cpu().numpy(), return_components=True)
-        B = inputs_np.shape[0]
-        mse_raw = main.mse(inputs_np.reshape(B, -1), predicted_np.reshape(B, -1))
-
     window_size = windows.shape[1]
-    pad = np.zeros(window_size - 1)
-    return dict(
-        raw_series=np.concatenate([pad, windows[:, -1, 0].numpy()]),
-        reconstruction=np.concatenate([pad, predicted[:, -1, 0].cpu().numpy()]),
-        mse_score=np.concatenate([pad, mse_score]),
-        ce_score=np.concatenate([pad, ce_score]),
-        score=np.concatenate([pad, score]),
-        mse_raw=np.concatenate([pad, mse_raw]),
-    )
+    return _curves_from_model_outputs(inputs.cpu().numpy(), predicted.cpu().numpy(),
+                                       pred_label.cpu().numpy(), window_size)
+
+
+def compute_dense_curves_batch(windows_list, model, device):
+    """windows_list: list of torch.Tensor (n_windows_i, window_size,
+    n_features), one per independent local chunk (same window_size
+    throughout; n_windows_i may differ, e.g. chunks clipped near an
+    entity's own edges). Runs the model in a SINGLE forward pass over the
+    concatenation of all of them -- a pure per-window computation with no
+    cross-window dependency, so concatenating is safe -- to cut down on
+    per-call Python/dispatch overhead when there are many small independent
+    chunks (e.g. up to 12 types x N_SAMPLES per entity/split in
+    build_self_train_val_diagnostics.py/build_anomsim_train_val_diagnostics.py).
+    The model output is then split back apart and main.anomaly_scoreing/
+    main.mse are run PER CHUNK separately (not batched) -- their
+    box-convolution smoothing and [0,1] min-max normalization are only
+    correct within one continuous chunk and must not blend across
+    independent ones. Returns a list of curve dicts, same order/length as
+    windows_list -- () if windows_list is empty."""
+    if not windows_list:
+        return []
+    window_size = windows_list[0].shape[1]
+    sizes = [w.shape[0] for w in windows_list]
+    with torch.no_grad():
+        inputs = torch.cat(windows_list, dim=0).to(device)
+        predicted, pred_label, pred_enc = model(inputs)
+    inputs_np = inputs.cpu().numpy()
+    predicted_np = predicted.cpu().numpy()
+    pred_label_np = pred_label.cpu().numpy()
+
+    results = []
+    offset = 0
+    for size in sizes:
+        sl = slice(offset, offset + size)
+        offset += size
+        results.append(_curves_from_model_outputs(inputs_np[sl], predicted_np[sl], pred_label_np[sl], window_size))
+    return results
 
 
 def save_curves_npz(path, curves):
@@ -141,6 +194,54 @@ def find_anomaly_segments(real_labels, max_segments=5):
     return segments[:max_segments]
 
 
+def dense_windows_from_chunk(chunk, window_size):
+    """chunk: (n_features, L) -> torch.FloatTensor (L-window_size+1, window_size,
+    n_features), matching compute_dense_curves's expected input shape. Used to
+    turn a small LOCAL raw chunk (from build_local_chunk) into the same kind of
+    window_step=1 dense window stack that used to come from a whole-split
+    Loader_aug pass -- compute_dense_curves itself doesn't change."""
+    windows = np.lib.stride_tricks.sliding_window_view(chunk, window_size, axis=1)  # (n_features, n_windows, window_size)
+    windows = np.ascontiguousarray(windows.transpose(1, 2, 0))  # (n_windows, window_size, n_features)
+    return torch.tensor(windows, dtype=torch.float32)
+
+
+def build_local_chunk(Y, focus_start, focus_end, inject_fn=None):
+    """Y: (n_features, n_time) the real, unmodified signal for one entity/split.
+    Extracts a local chunk of up to 2*window_size real context on each side of
+    the focus window [focus_start, focus_end) (clipped at the signal's own
+    edges), then -- if inject_fn is given -- injects a SINGLE anomaly instance
+    into ONLY the focus sub-range, leaving the context on both sides untouched
+    real data. inject_fn(window) -> (injected_window, mask), same (n_features,
+    window_size) shape as the window it's given; mask 0 where modified,
+    matching RedLamp's anomaly_mask convention.
+
+    Returns (chunk, local_focus_start, anomaly_spans):
+      chunk: (n_features, chunk_len) -- feed through dense_windows_from_chunk.
+      local_focus_start: the focus window's start index WITHIN chunk (usually
+        2*window_size, less near the signal's own edges).
+      anomaly_spans: [(start, end)] in chunk-local coordinates where inject_fn
+        actually modified the signal -- empty if inject_fn is None (e.g. the
+        'normal' section, or the real UCR test signal, which has no injection
+        at all; real ground-truth anomaly spans there come from labels
+        instead, computed separately by the caller)."""
+    window_size = focus_end - focus_start
+    n_time = Y.shape[1]
+    chunk_start = max(0, focus_start - 2 * window_size)
+    chunk_end = min(n_time, focus_end + 2 * window_size)
+    chunk = np.array(Y[:, chunk_start:chunk_end], copy=True)
+    local_focus_start = focus_start - chunk_start
+
+    spans = []
+    if inject_fn is not None:
+        window = Y[:, focus_start:focus_end]
+        injected, mask = inject_fn(window)
+        chunk[:, local_focus_start:local_focus_start + window_size] = injected
+        modified = (np.asarray(mask).min(axis=0) == 0).astype(int)
+        spans = [(s + local_focus_start, e + local_focus_start)
+                 for s, e in find_anomaly_segments(modified, max_segments=5)]
+    return chunk, local_focus_start, spans
+
+
 def pick_extreme_positions(curves, window_size):
     """argmax/argmin of mse_score and ce_score, restricted to real
     (non-zero-padded) positions -- the first window_size-1 entries are fake
@@ -203,15 +304,19 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
             exactly mse_score/ce_score/score from main.anomaly_scoreing,
             i.e. panel 1.5 (or its CE-side equivalent) run through
             convolve_minmax_score. Each is independently min-max normalized
-            to [0,1] over the WHOLE entity/split (not just this local
-            display slice), so a flat-looking curve here doesn't mean flat
-            raw error -- it means this local slice sits in a narrow part of
-            that entity's own full min-max range (compare against panel
-            1.25/1.5 for the unnormalized picture). Smoothing also changes
-            the shape, not just the scale, versus panels 1.25/1.5 -- it's a
-            literal box-convolution low-pass filter, so sharp local spikes
-            get attenuated/widened. Fixed y-axis [0,1] for comparability
-            across pages."""
+            to [0,1] over whatever curve was actually passed in as `series`
+            -- for build_self_train_val_diagnostics.py/
+            build_anomsim_train_val_diagnostics.py/build_ucr_test_diagnostics.py
+            that's the small LOCAL chunk built by build_local_chunk (this
+            focus window + its context), NOT the entity's whole split, so
+            scores are only comparable WITHIN one page, not across pages --
+            each page is its own self-contained min-max range (compare
+            against panel 1.25/1.5 for the unnormalized picture, which IS
+            comparable across pages). Smoothing also changes the shape, not
+            just the scale, versus panels 1.25/1.5 -- it's a literal
+            box-convolution low-pass filter, so sharp local spikes get
+            attenuated/widened. Fixed y-axis [0,1] for comparability across
+            pages despite the per-page normalization."""
     total_len = len(raw_series)
     d0, d1 = display_bounds(focus_start, focus_end, window_size, total_len)
     x = np.arange(d0, d1)

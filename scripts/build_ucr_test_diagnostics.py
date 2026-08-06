@@ -19,10 +19,19 @@ shaded on every page for that entity, regardless of which position the page
 is centered on, so it's visually obvious whether a given criterion's pick
 landed on/near the real anomaly or somewhere else entirely.
 
-Reuses full_reproduction_metrics.score_entity(..., include_curves=True)
-unchanged (already does the dense window_step=1 pass over test_all) --
-called once per entity per model (Self, Cross-AnomSim), not once per
-position, and cached to .npz.
+Position SELECTION still reuses full_reproduction_metrics.score_entity(...,
+include_curves=True) unchanged (the whole-split dense pass, cached to
+.npz) -- finding argmax/argmin/real segments genuinely needs the whole
+split's own view. But RENDERING each selected position now recomputes
+locally, matching build_self_train_val_diagnostics.py/
+build_anomsim_train_val_diagnostics.py: a small chunk of real signal
+(2*window_size context on each side of the focus window, no injection --
+this is real ground-truth data) is re-run through both models via
+local_diagnostic_curves.build_local_chunk/dense_windows_from_chunk/
+compute_dense_curves, so mse_score/ce_score/score's [0,1] normalization is
+local to what's shown on the page instead of spanning the entire test
+split (same reasoning as the train/val redesign -- treat each displayed
+focus window + its context as its own small standalone series).
 
 Runs on CPU (matching build_self_train_val_diagnostics.py and
 build_anomsim_train_val_diagnostics.py) rather than GPU -- ConvAEC
@@ -89,6 +98,7 @@ def run():
     model_args = ci.build_model_args(dg.CFG, cps.WINDOW_SIZE)
     params = utils.AttrDict(seed=args.seed)
     params.override(main.model_parameters(model_args))
+    cross_model = ldc.load_convaec_model(cross_anomsim_model_dir, params, device)
 
     entities = frm.discover_dataset_entities(args.run_name, DATASET)
     if args.num_shards > 1:
@@ -138,20 +148,33 @@ def run():
             labeled_positions += [(idx, f'Cross-AnomSim {name}') for name, idx in cross_extremes.items()]
             merged = ldc.merge_nearby_positions(labeled_positions, window_size)
 
+            self_model = ldc.load_convaec_model(self_model_dir, params, device)
+            Y = self_curves['raw_series'][None, :]  # (1, n_time) -- real test signal, same for both models
+            real_labels = self_curves['real_labels']
+
             for center, labels in merged:
                 focus_start = center - window_size // 2
                 focus_end = focus_start + window_size
+                chunk, local_focus_start, _ = ldc.build_local_chunk(Y, focus_start, focus_end, inject_fn=None)
+                chunk_start = focus_start - local_focus_start
+                chunk_end = chunk_start + chunk.shape[1]
+                local_real_segments = ldc.find_anomaly_segments(real_labels[chunk_start:chunk_end], max_segments=5)
+
+                windows = ldc.dense_windows_from_chunk(chunk, window_size)
+                self_local = ldc.compute_dense_curves(windows, self_model, device)
+                cross_local = ldc.compute_dense_curves(windows, cross_model, device)
+
                 ldc.plot_diagnostic_page(
-                    pdf, self_curves['raw_series'],
-                    [dict(label='self', reconstruction=self_curves['reconstruction'],
-                          mse_score=self_curves['mse_score'], ce_score=self_curves['ce_score'], score=self_curves['score'],
-                          mse_raw=self_curves['mse_raw']),
-                     dict(label='cross_anomsim', reconstruction=cross_curves['reconstruction'],
-                          mse_score=cross_curves['mse_score'], ce_score=cross_curves['ce_score'], score=cross_curves['score'],
-                          mse_raw=cross_curves['mse_raw'])],
-                    focus_start, focus_end, window_size,
+                    pdf, self_local['raw_series'],
+                    [dict(label='self', reconstruction=self_local['reconstruction'],
+                          mse_score=self_local['mse_score'], ce_score=self_local['ce_score'], score=self_local['score'],
+                          mse_raw=self_local['mse_raw']),
+                     dict(label='cross_anomsim', reconstruction=cross_local['reconstruction'],
+                          mse_score=cross_local['mse_score'], ce_score=cross_local['ce_score'], score=cross_local['score'],
+                          mse_raw=cross_local['mse_raw'])],
+                    local_focus_start, local_focus_start + window_size, window_size,
                     title=f'{entity} | ' + ', '.join(labels),
-                    real_anomaly_spans=real_segments)
+                    real_anomaly_spans=local_real_segments)
             print(f'  {entity}: {len(merged)} page(s)')
 
     print(f'Wrote {out_path}')
