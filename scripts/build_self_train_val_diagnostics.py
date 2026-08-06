@@ -5,35 +5,26 @@ Anomaly score, all four already-existing quantities from
 main.anomaly_scoreing, just visualized over train/val splits instead of
 only test).
 
-Picks --n_entities UCR entities once (seeded) and reuses the SAME entities
-across every anomaly type and both splits, for direct comparability. For
-each (entity, split, type), builds a DENSE (window_step=1) Loader_aug
-restricted to that single anomaly_type (so every window in it independently
-gets that type injected -- there's no "clean vs injected" distinction to
-manage here, matching how the model was actually trained/evaluated), runs
-it through Self's own dedicated checkpoint, and displays one arbitrary
-window (the middle of the split) plus 2*window_size of context on each
-side.
+Covers EVERY UCR entity discovered for --run_name (not a sample) -- one PDF
+PER ENTITY per split (Self_Train_{entity}.pdf, Self_Val_{entity}.pdf), each
+with 12 sections (Normal + 11 injected types) x 5 pages. The 5 pages per
+section show 5 DIFFERENT display windows of the SAME already-computed
+dense curve (see pick_sample_positions) -- dense window_step=1 injection
+draws an independent random instance of that type at every window
+position, so different positions genuinely show different injected
+samples, not just different crops of one instance. Inference itself is
+only ever run once per (entity, split, type) and cached to .npz; the 5
+pages are free reslicing of that same cached curve.
 
-Computation is grouped by entity: its own checkpoint is loaded once and its
-(train_dataset, val_dataset) pair is loaded off disk once (load_data itself
-already returns both in one call), then a fresh Loader_aug is built per
-(split, type) from those already-loaded datasets -- injection genuinely
-differs per type so that part can't be cached, but there's no reason to
-re-read the entity's raw data or reload its model checkpoint 24 times
-(12 types x 2 splits) over.
-
-Consolidated into just 2 PDFs (Train, Val) with many pages/sections inside,
-rather than one PDF per type -- see the plan's PDF-count discussion.
-
-Curves are cached to .npz under --cache_dir so future diagnostics can reuse
-them without re-running inference.
+--shard_index/--num_shards split the ENTITY list across concurrent
+processes (see run_self_train_val_diagnostics_parallel.py) -- since output
+is one file per entity, shards never write the same file and need no
+merge step.
 """
 import argparse
 import os
 import sys
 
-import numpy as np
 import torch
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -50,6 +41,7 @@ import local_diagnostic_curves as ldc
 
 DATASET = 'anomaly_archive'
 TYPES = ci.ANOMALY_TYPES  # ['normal', 'spike', 'flip', ...] -- 12 items, index 0 = normal
+N_SAMPLES = 5
 
 
 def load_entity_datasets(entity, disk_cfg):
@@ -77,10 +69,10 @@ def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', default='test')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--n_entities', type=int, default=5)
-    parser.add_argument('--rng_seed', type=int, default=0)
-    parser.add_argument('--out_dir', default='./result/DS_3/train_val_diagnostics')
+    parser.add_argument('--out_dir', default='./result/DS_3/train_val_diagnostics/self')
     parser.add_argument('--cache_dir', default='./result/DS_3/curves_cache/self')
+    parser.add_argument('--shard_index', type=int, default=0)
+    parser.add_argument('--num_shards', type=int, default=1)
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args()
 
@@ -89,22 +81,20 @@ def run():
     params = utils.AttrDict(seed=args.seed)
     params.override(main.model_parameters(model_args))
 
-    all_entities = frm.discover_dataset_entities(args.run_name, DATASET)
-    rng = np.random.default_rng(args.rng_seed)
-    entities = sorted(rng.choice(all_entities, size=min(args.n_entities, len(all_entities)), replace=False).tolist())
-    print(f'Selected {len(entities)} entities: {entities}')
+    entities = frm.discover_dataset_entities(args.run_name, DATASET)
+    if args.num_shards > 1:
+        entities = [e for i, e in enumerate(entities) if i % args.num_shards == args.shard_index]
+    print(f'{len(entities)} entities to process (shard {args.shard_index}/{args.num_shards})')
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    curves_by_key = {}  # (entity, split, type) -> curves dict
-    window_size_by_entity = {}
     for entity in entities:
         try:
             model_dir, disk_cfg = ci.discover_entity(args.run_name, DATASET, entity, args.seed)
         except FileNotFoundError:
             print(f'[skip] {entity}: no trained model found')
             continue
-        window_size_by_entity[entity] = disk_cfg['window_size']
+        window_size = disk_cfg['window_size']
 
         needed_types = [t for t in TYPES for split in ['train', 'val']
                          if args.force or not os.path.isfile(os.path.join(args.cache_dir, f'{entity}_{split}_{t}.npz'))]
@@ -114,6 +104,7 @@ def run():
             model = ldc.load_convaec_model(model_dir, params, device)
             train_dataset, val_dataset = load_entity_datasets(entity, disk_cfg)
 
+        curves_by_split_type = {}
         for split in ['train', 'val']:
             for anomaly_type in TYPES:
                 cache_path = os.path.join(args.cache_dir, f'{entity}_{split}_{anomaly_type}.npz')
@@ -122,35 +113,26 @@ def run():
                     windows = windows_for_type(train_dataset, val_dataset, split, anomaly_type, disk_cfg)
                     return ldc.compute_dense_curves(windows, model, device)
 
-                curves = ldc.get_or_compute_curves(cache_path, compute, force=args.force)
-                curves_by_key[(entity, split, anomaly_type)] = curves
-                print(f'  computed/cached: {entity} / {anomaly_type} / {split}')
+                curves_by_split_type[(split, anomaly_type)] = ldc.get_or_compute_curves(cache_path, compute, force=args.force)
 
-    for split in ['train', 'val']:
-        out_path = os.path.join(args.out_dir, f'Self_{split.capitalize()}_inference_samples.pdf')
-        with PdfPages(out_path) as pdf:
-            for anomaly_type in TYPES:
-                for entity in entities:
-                    key = (entity, split, anomaly_type)
-                    if key not in curves_by_key:
-                        continue
-                    curves = curves_by_key[key]
+        for split in ['train', 'val']:
+            out_path = os.path.join(args.out_dir, f'Self_{split.capitalize()}_{entity}.pdf')
+            with PdfPages(out_path) as pdf:
+                for anomaly_type in TYPES:
+                    curves = curves_by_split_type[(split, anomaly_type)]
                     if len(curves['raw_series']) == 0:
                         print(f'[skip] {entity}/{split}/{anomaly_type}: empty split')
                         continue
-
-                    window_size = window_size_by_entity[entity]
-                    focus_end = len(curves['raw_series']) // 2
-                    focus_start, focus_end = ldc.window_bounds_from_end_index(focus_end, window_size)
-
-                    ldc.plot_diagnostic_page(
-                        pdf, curves['raw_series'],
-                        [dict(label='self', reconstruction=curves['reconstruction'],
-                              mse_score=curves['mse_score'], ce_score=curves['ce_score'], score=curves['score'])],
-                        focus_start, focus_end, window_size,
-                        title=f'Self | {entity} | {anomaly_type} | {split}')
-
-        print(f'Wrote {out_path}')
+                    positions = ldc.pick_sample_positions(len(curves['raw_series']), window_size, n=N_SAMPLES)
+                    for sample_i, center in enumerate(positions, start=1):
+                        focus_start, focus_end = ldc.window_bounds_from_end_index(center, window_size)
+                        ldc.plot_diagnostic_page(
+                            pdf, curves['raw_series'],
+                            [dict(label='self', reconstruction=curves['reconstruction'],
+                                  mse_score=curves['mse_score'], ce_score=curves['ce_score'], score=curves['score'])],
+                            focus_start, focus_end, window_size,
+                            title=f'Self | {entity} | {anomaly_type} | {split} | sample {sample_i}/{N_SAMPLES}')
+            print(f'Wrote {out_path}')
 
     print('Done.')
 

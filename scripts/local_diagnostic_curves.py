@@ -90,6 +90,29 @@ def window_bounds_from_end_index(end_idx, window_size):
     return end_idx - window_size + 1, end_idx + 1
 
 
+def pick_sample_positions(curve_len, window_size, n=5):
+    """n evenly-spaced center positions within the curve's valid (non-zero-
+    padded) range -- used to show n DIFFERENT display windows for the same
+    cached (entity, split, type) curve, e.g. because dense window_step=1
+    injection draws an independent random instance of that anomaly type at
+    every position, so different positions genuinely show different
+    injected samples, not just different crops of the same one.
+
+    Prefers positions with a full 2*window_size of real context on both
+    sides (matching plot_diagnostic_page's own display_bounds) so pages
+    aren't dominated by zero-padding or an abruptly-truncated end -- falls
+    back to the full valid range only if the curve is too short for that."""
+    valid_start = window_size - 1
+    valid_end = curve_len - 1
+    safe_start = valid_start + 2 * window_size
+    safe_end = valid_end - 2 * window_size
+    if safe_end > safe_start:
+        valid_start, valid_end = safe_start, safe_end
+    if valid_end <= valid_start:
+        return [valid_start] * n
+    return [int(round(x)) for x in np.linspace(valid_start, valid_end, n)]
+
+
 def find_anomaly_segments(real_labels, max_segments=5):
     """Contiguous runs of 1s in a binary label array, longest first, capped
     at max_segments. Returns a list of (start, end) [inclusive, exclusive)."""
