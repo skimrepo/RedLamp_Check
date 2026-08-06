@@ -114,6 +114,8 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
         # the same timesteps, the blended score never reaches close to 0 or 1
         # (see analyze_score_oscillation.py, which checks exactly this).
         score, mse_score, ce_score = main.anomaly_scoreing(inputs, prediction, pred_label, return_components=True)
+        B = inputs.shape[0]
+        mse_raw = main.mse(inputs.reshape(B, -1), prediction.reshape(B, -1))
     else:
         score = main.anomaly_scoreing(inputs, prediction, pred_label)
     _, window_size, _ = inputs.shape
@@ -160,6 +162,10 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
         # (last timestep of each window) -- used by build_ucr_test_diagnostics.py
         # to overlay reconstruction on top of the raw signal in Panel 1.
         result['reconstruction'] = np.concatenate([np.zeros(window_size - 1), prediction[:, -1, 0]])
+        # Pre-normalization MSE (before convolve_minmax_score's smoothing+
+        # [0,1] scaling) -- mse_score's normalization is per-entity, so its
+        # absolute scale isn't comparable across entities; this is.
+        result['mse_raw'] = np.concatenate([np.zeros(window_size - 1), mse_raw])
     return result
 
 

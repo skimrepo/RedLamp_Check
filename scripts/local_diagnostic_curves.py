@@ -38,13 +38,25 @@ def compute_dense_curves(windows, model, device):
     """windows: torch.Tensor (n_windows, window_size, n_features), CPU,
     ordered by position with window_step=1 (consecutive windows overlap by
     window_size-1). Returns dict(raw_series, reconstruction, mse_score,
-    ce_score, score), each zero-padded at the front by window_size-1 so
-    curve index t lines up with the raw signal's own timestep t."""
+    ce_score, score, mse_raw), each zero-padded at the front by
+    window_size-1 so curve index t lines up with the raw signal's own
+    timestep t.
+
+    mse_raw is the per-window reconstruction MSE BEFORE
+    convolve_minmax_score's smoothing+[0,1] normalization (main.mse(),
+    the same call anomaly_scoreing() makes internally before smoothing) --
+    exposed separately since mse_score's normalization is per-entity/split,
+    so its absolute scale can't be compared across pages/entities; mse_raw
+    can."""
     with torch.no_grad():
         inputs = windows.to(device)
         predicted, pred_label, pred_enc = model(inputs)
+        inputs_np = inputs.cpu().numpy()
+        predicted_np = predicted.cpu().numpy()
         score, mse_score, ce_score = main.anomaly_scoreing(
-            inputs.cpu().numpy(), predicted.cpu().numpy(), pred_label.cpu().numpy(), return_components=True)
+            inputs_np, predicted_np, pred_label.cpu().numpy(), return_components=True)
+        B = inputs_np.shape[0]
+        mse_raw = main.mse(inputs_np.reshape(B, -1), predicted_np.reshape(B, -1))
 
     window_size = windows.shape[1]
     pad = np.zeros(window_size - 1)
@@ -54,6 +66,7 @@ def compute_dense_curves(windows, model, device):
         mse_score=np.concatenate([pad, mse_score]),
         ce_score=np.concatenate([pad, ce_score]),
         score=np.concatenate([pad, score]),
+        mse_raw=np.concatenate([pad, mse_raw]),
     )
 
 
@@ -171,18 +184,32 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
     all series -- there's only ever one underlying signal per page, even
     when overlaying 2 models' curves).
     series_list: list of dict(label, color, reconstruction, mse_score,
-    ce_score, score) -- one dict per model (1 for Self/AnomSim-only pages,
-    2 for Self+Cross-AnomSim overlay on Test pages).
-    real_anomaly_spans: optional list of (start, end) to shade in every panel."""
+    ce_score, score, mse_raw) -- one dict per model (1 for Self/AnomSim-only
+    pages, 2 for Self+Cross-AnomSim overlay on Test pages).
+    real_anomaly_spans: optional list of (start, end) to shade in every panel.
+
+    5 panels: raw+reconstruction, raw (pre-normalization) MSE ["panel 1.5",
+    free y-axis], MSE score, CE score, Anomaly score. The last three are
+    each independently min-max normalized to [0,1] by construction (see
+    main.anomaly_scoreing/convolve_minmax_score), so their y-axis is fixed
+    to [0,1] for comparability across pages -- only panel 1.5 (raw MSE,
+    never normalized) gets a free y-axis."""
     total_len = len(raw_series)
     d0, d1 = display_bounds(focus_start, focus_end, window_size, total_len)
     x = np.arange(d0, d1)
     raw_slice = raw_series[d0:d1]
     in_focus = (x >= focus_start) & (x < focus_end)
 
-    fig, (ax_raw, ax_mse, ax_ce, ax_score) = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
+    fig, (ax_raw, ax_mse_raw, ax_mse, ax_ce, ax_score) = plt.subplots(5, 1, figsize=(11, 12), sharex=True)
 
-    ax_raw.plot(x[~in_focus], raw_slice[~in_focus], color='#888888', linewidth=1.0, label='context (raw)')
+    # Draw the FULL context line first (one continuous segment, no gaps),
+    # then overlay just the focus span in its own color on top -- masking
+    # both pieces via x[~in_focus]/x[in_focus] instead would leave a straight
+    # line falsely bridging the excised gap (matplotlib always connects
+    # consecutive points in whatever's passed to plot(), and boolean masking
+    # makes the two context sub-arrays adjacent even though there's a real
+    # gap between them).
+    ax_raw.plot(x, raw_slice, color='#888888', linewidth=1.0, label='context (raw)')
     ax_raw.plot(x[in_focus], raw_slice[in_focus], color='#1f77b4', linewidth=1.4, label='focus window (raw)')
     recon_colors = ['#e0883f', '#3fae59']
     for i, s in enumerate(series_list):
@@ -191,6 +218,11 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
                     alpha=0.85, label=f"{s['label']} reconstruction")
     ax_raw.set_ylabel('raw / reconstruction')
 
+    for i, s in enumerate(series_list):
+        color = s.get('color', recon_colors[i % len(recon_colors)])
+        ax_mse_raw.plot(x, s['mse_raw'][d0:d1], color=color, linewidth=1.1, alpha=0.9, label=s['label'])
+    ax_mse_raw.set_ylabel('MSE (raw)')
+
     for ax, key, ylabel in [(ax_mse, 'mse_score', 'MSE score'),
                              (ax_ce, 'ce_score', 'CE score'),
                              (ax_score, 'score', 'Anomaly score')]:
@@ -198,15 +230,14 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
             color = s.get('color', recon_colors[i % len(recon_colors)])
             ax.plot(x, s[key][d0:d1], color=color, linewidth=1.1, alpha=0.9, label=s['label'])
         ax.set_ylabel(ylabel)
+        ax.set_ylim(0, 1)
 
     for span_start, span_end in (real_anomaly_spans or []):
-        for ax in (ax_raw, ax_mse, ax_ce, ax_score):
+        for ax in (ax_raw, ax_mse_raw, ax_mse, ax_ce, ax_score):
             ax.axvspan(span_start, span_end, color='#e34948', alpha=0.15)
 
-    ax_raw.legend(fontsize=7, loc='upper right')
-    ax_mse.legend(fontsize=7, loc='upper right')
-    ax_ce.legend(fontsize=7, loc='upper right')
-    ax_score.legend(fontsize=7, loc='upper right')
+    for ax in (ax_raw, ax_mse_raw, ax_mse, ax_ce, ax_score):
+        ax.legend(fontsize=7, loc='upper right')
     ax_score.set_xlabel('timestep')
     fig.suptitle(title, fontsize=10)
     fig.tight_layout()

@@ -44,7 +44,7 @@ import full_reproduction_metrics as frm
 import local_diagnostic_curves as ldc
 
 DATASET = 'anomaly_archive'
-CURVE_KEYS = ['raw_series', 'reconstruction', 'mse_score', 'ce_score', 'score', 'real_labels']
+CURVE_KEYS = ['raw_series', 'reconstruction', 'mse_score', 'ce_score', 'score', 'real_labels', 'mse_raw']
 
 
 def get_curves_cached(cache_path, compute_fn, force=False):
@@ -136,9 +136,11 @@ def run():
                 ldc.plot_diagnostic_page(
                     pdf, self_curves['raw_series'],
                     [dict(label='self', reconstruction=self_curves['reconstruction'],
-                          mse_score=self_curves['mse_score'], ce_score=self_curves['ce_score'], score=self_curves['score']),
+                          mse_score=self_curves['mse_score'], ce_score=self_curves['ce_score'], score=self_curves['score'],
+                          mse_raw=self_curves['mse_raw']),
                      dict(label='cross_anomsim', reconstruction=cross_curves['reconstruction'],
-                          mse_score=cross_curves['mse_score'], ce_score=cross_curves['ce_score'], score=cross_curves['score'])],
+                          mse_score=cross_curves['mse_score'], ce_score=cross_curves['ce_score'], score=cross_curves['score'],
+                          mse_raw=cross_curves['mse_raw'])],
                     focus_start, focus_end, window_size,
                     title=f'{entity} | ' + ', '.join(labels),
                     real_anomaly_spans=real_segments)

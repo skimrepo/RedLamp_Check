@@ -129,7 +129,8 @@ def run():
                         ldc.plot_diagnostic_page(
                             pdf, curves['raw_series'],
                             [dict(label='self', reconstruction=curves['reconstruction'],
-                                  mse_score=curves['mse_score'], ce_score=curves['ce_score'], score=curves['score'])],
+                                  mse_score=curves['mse_score'], ce_score=curves['ce_score'], score=curves['score'],
+                                  mse_raw=curves['mse_raw'])],
                             focus_start, focus_end, window_size,
                             title=f'Self | {entity} | {anomaly_type} | {split} | sample {sample_i}/{N_SAMPLES}')
             print(f'Wrote {out_path}')
