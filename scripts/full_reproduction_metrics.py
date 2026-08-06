@@ -156,6 +156,10 @@ def score_entity(run_name, dataset, real_name, seed, params, device, model_dir=N
         result['raw_series'] = raw_series
         result['mse_score'] = np.concatenate([np.zeros(window_size - 1), mse_score])
         result['ce_score'] = np.concatenate([np.zeros(window_size - 1), ce_score])
+        # Model's own reconstruction (x_hat), aligned the same way as raw_series
+        # (last timestep of each window) -- used by build_ucr_test_diagnostics.py
+        # to overlay reconstruction on top of the raw signal in Panel 1.
+        result['reconstruction'] = np.concatenate([np.zeros(window_size - 1), prediction[:, -1, 0]])
     return result
 
 
