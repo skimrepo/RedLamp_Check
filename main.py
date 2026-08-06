@@ -154,6 +154,7 @@ class REDLAMP:
         loss = torch.tensor([0.0], requires_grad=False, device=self.device)
         loss_AE = torch.tensor([0.0], requires_grad=False, device=self.device)
         loss_C = torch.tensor([0.0], requires_grad=False, device=self.device)
+        step_count = 0
 
         self.model.eval()
         with torch.no_grad():
@@ -171,7 +172,14 @@ class REDLAMP:
                 loss += loss_aec
                 loss_AE += loss_ae
                 loss_C += loss_c
-            return loss, loss_AE, loss_C
+                step_count += 1
+            # Match train()'s own averaging convention (cum_loss/step_count) --
+            # previously this summed across val batches instead of averaging,
+            # so val_loss/val_loss_ae/val_loss_c scaled with each entity's
+            # validation-set batch count, making them incomparable across
+            # entities/models even though within a single entity's own run
+            # the (constant) batch count didn't change which epoch was "best".
+            return loss/step_count, loss_AE/step_count, loss_C/step_count
 
 
 def test(test_dataloader, model_dir, params, device):
