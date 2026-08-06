@@ -17,6 +17,14 @@ All shards default to the same --gpu -- fine to share since this workload
 is mostly CPU-bound (TSB_UAD's get_metrics, rolling std/correlation), not
 GPU-bound (ConvAEC inference on it is comparatively light). If shards
 contend too much for GPU memory in practice, lower --num_shards.
+
+Each shard's PyTorch/numpy defaults to using EVERY core on the machine for
+its own intra-op threading (OMP/MKL), so N shards launched with a bare
+subprocess.Popen would have N processes all fighting over all cores at
+once (visibly ~100% on every core in htop, but mostly context-switching
+overhead, not N-way speedup) -- caps each shard's thread count to
+cores/num_shards via OMP_NUM_THREADS/MKL_NUM_THREADS/NUMEXPR_NUM_THREADS so
+the shards actually divide the machine instead of oversubscribing it.
 """
 import argparse
 import os
@@ -27,6 +35,14 @@ import pandas as pd
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_PATH = os.path.join(REPO_ROOT, 'scripts', 'analyze_score_oscillation.py')
+
+
+def shard_env(num_shards):
+    env = os.environ.copy()
+    n_threads = max(1, (os.cpu_count() or num_shards) // num_shards)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        env[var] = str(n_threads)
+    return env
 
 
 def run():
@@ -47,6 +63,9 @@ def run():
     out_dir = os.path.dirname(args.out_csv) or '.'
     shard_dir = os.path.join(out_dir, 'shards')
     os.makedirs(shard_dir, exist_ok=True)
+    env = shard_env(args.num_shards)
+    print(f'Capping each shard to OMP/MKL_NUM_THREADS={env["OMP_NUM_THREADS"]} '
+          f'({os.cpu_count()} cores / {args.num_shards} shards)')
 
     procs = []
     shard_csvs = []
@@ -67,7 +86,7 @@ def run():
         log_path = os.path.join(shard_dir, f'shard{i}.log')
         log_file = open(log_path, 'w')
         print(f'[launch] shard {i}/{args.num_shards} -> {shard_csv} (log: {log_path})')
-        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT, env=env)
         procs.append((i, proc, log_file))
 
     failed = []

@@ -7,6 +7,14 @@ Unlike run_score_oscillation_parallel.py, there is NO merge step: each
 entity gets its own PDF files (Self_Train_{entity}.pdf, Self_Val_{entity}.pdf),
 so different shards never write the same file and their outputs are
 already complete once all shards finish -- just launch and wait.
+
+Each shard's PyTorch defaults to using EVERY core on the machine for its
+own intra-op threading (OMP/MKL), so N shards launched with a bare
+subprocess.Popen would have N processes all fighting over all cores at
+once (visibly ~100% on every core in htop, but mostly context-switching
+overhead, not N-way speedup) -- caps each shard's thread count to
+cores/num_shards via OMP_NUM_THREADS/MKL_NUM_THREADS/NUMEXPR_NUM_THREADS so
+the shards actually divide the machine instead of oversubscribing it.
 """
 import argparse
 import os
@@ -15,6 +23,14 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_PATH = os.path.join(REPO_ROOT, 'scripts', 'build_self_train_val_diagnostics.py')
+
+
+def shard_env(num_shards):
+    env = os.environ.copy()
+    n_threads = max(1, (os.cpu_count() or num_shards) // num_shards)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        env[var] = str(n_threads)
+    return env
 
 
 def run():
@@ -30,6 +46,9 @@ def run():
 
     log_dir = os.path.join(args.out_dir, 'logs')
     os.makedirs(log_dir, exist_ok=True)
+    env = shard_env(args.num_shards)
+    print(f'Capping each shard to OMP/MKL_NUM_THREADS={env["OMP_NUM_THREADS"]} '
+          f'({os.cpu_count()} cores / {args.num_shards} shards)')
 
     procs = []
     for i in range(args.num_shards):
@@ -43,7 +62,7 @@ def run():
         log_path = os.path.join(log_dir, f'shard{i}.log')
         log_file = open(log_path, 'w')
         print(f'[launch] shard {i}/{args.num_shards} (log: {log_path})')
-        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log_file, stderr=subprocess.STDOUT, env=env)
         procs.append((i, proc, log_file))
 
     failed = []
