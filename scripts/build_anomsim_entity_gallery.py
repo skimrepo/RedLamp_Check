@@ -4,6 +4,13 @@ a quick "what does this dataset actually look like" overview, distinct from
 build_anomsim_train_val_diagnostics.py's per-entity injected-anomaly
 diagnostic PDFs.
 
+Each entity's page is a 5x2 grid (local_diagnostic_curves.
+plot_entity_gallery_page): the top row spans both columns and shows the
+WHOLE entity waveform; the 4 rows below show 8 evenly-spaced example
+windows sampled from within that same series, so you can see what an
+actual window_size-length model input from this entity looks like without
+having to squint at the full series.
+
 AnomSim_v1 entities have no ground-truth anomaly labels at all (just
 Y.npy, no companion labels/mask file -- confirmed by inspecting the
 dataset directory), so there's nothing to highlight here, just the raw
@@ -15,11 +22,11 @@ import os
 import sys
 
 import numpy as np
-from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE_CLUSTERING_DEFAULT = os.path.join(REPO_ROOT, '..', 'Core-Clustering')
+WINDOW_SIZE = 100
 
 
 def run():
@@ -30,7 +37,9 @@ def run():
     args = parser.parse_args()
 
     sys.path.insert(0, args.core_clustering_dir)
+    sys.path.insert(0, REPO_ROOT)
     from core_clustering.single_entity import list_entities
+    import local_diagnostic_curves as ldc
 
     entities = list_entities(args.dataset_dir)
     print(f'{len(entities)} AnomSim_v1 entities to plot')
@@ -43,14 +52,7 @@ def run():
                 print(f'[skip] {entity_dir}: no Y.npy found')
                 continue
             Y = np.load(y_path)
-
-            fig, ax = plt.subplots(figsize=(11, 3))
-            ax.plot(Y[0], color='#333333', linewidth=0.8)
-            ax.set_title(entity_dir, fontsize=10)
-            ax.set_xlabel('timestep')
-            fig.tight_layout()
-            pdf.savefig(fig)
-            plt.close(fig)
+            ldc.plot_entity_gallery_page(pdf, Y[0], WINDOW_SIZE, title=entity_dir)
 
     print(f'Wrote {args.out_pdf} ({len(entities)} pages)')
 

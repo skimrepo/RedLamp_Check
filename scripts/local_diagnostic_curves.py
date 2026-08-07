@@ -435,3 +435,42 @@ def plot_window_inspector_page(pdf, curves_by_model, models_by_label, device, po
     fig.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
+
+
+def plot_entity_gallery_page(pdf, raw, window_size, title='', real_anomaly_spans=None, n_windows=8):
+    """One page per entity, 5 rows x 2 cols: the top row spans both columns
+    and shows the entity's WHOLE raw series (real_anomaly_spans shaded, if
+    given); the remaining 4 rows x 2 cols show n_windows (default 8)
+    evenly-spaced example windows from within that same series -- reuses
+    pick_sample_positions/window_bounds_from_end_index exactly as train/val
+    sampling does elsewhere (those functions only assume a window must fit
+    within [0, len(raw)), which holds for a plain raw array just as well as
+    for a zero-padded dense curve). Used by build_anomsim_entity_gallery.py
+    (no anomaly spans -- AnomSim has no ground-truth labels) and
+    build_ucr_group_galleries.py (real ground-truth anomaly spans)."""
+    n_rows = int(np.ceil(n_windows / 2))
+    fig = plt.figure(figsize=(11, 3 + 2.3 * n_rows))
+    gs = fig.add_gridspec(n_rows + 1, 2, height_ratios=[2] + [1] * n_rows)
+
+    ax_top = fig.add_subplot(gs[0, :])
+    ax_top.plot(raw, color='#333333', linewidth=0.8)
+    for span_start, span_end in (real_anomaly_spans or []):
+        ax_top.axvspan(span_start, span_end, color='#e34948', alpha=0.15)
+    ax_top.set_title(title, fontsize=11)
+    ax_top.set_xlabel('timestep')
+
+    positions = pick_sample_positions(len(raw), window_size, n=n_windows)
+    for i, t in enumerate(positions):
+        start, end = window_bounds_from_end_index(t, window_size)
+        ax = fig.add_subplot(gs[1 + i // 2, i % 2])
+        ax.plot(np.arange(start, end), raw[start:end], color='#333333', linewidth=1.0)
+        for span_start, span_end in (real_anomaly_spans or []):
+            overlap_start, overlap_end = max(span_start, start), min(span_end, end)
+            if overlap_end > overlap_start:
+                ax.axvspan(overlap_start, overlap_end, color='#e34948', alpha=0.15)
+        ax.set_title(f'window {start}-{end - 1}', fontsize=8)
+        ax.tick_params(labelsize=7)
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)

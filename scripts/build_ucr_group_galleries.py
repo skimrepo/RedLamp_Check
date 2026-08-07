@@ -7,12 +7,15 @@ VUS_ROC_cross_anomsim (from result/Experiment_2/Results/ucr_results.xlsx's
 struggles relative to Self), Green = gap <= 0 (Cross-AnomSim keeps up with
 or beats Self), Other = everything in between.
 
-Each PDF has one page per entity in that group: the entity's real UCR TEST
-signal with the real ground-truth anomaly region shaded. Test-only, not
-train -- UCR's real anomaly is always confined to the test portion
-(loaders/load.py's load_anomaly_archive never builds a label array for
-group='train'), so a train-portion plot would have nothing to highlight
-and add little value.
+Each PDF has one page per entity in that group (local_diagnostic_curves.
+plot_entity_gallery_page's 5x2 grid): the top row spans both columns and
+shows the entity's real UCR TEST signal with the real ground-truth anomaly
+region shaded; the 4 rows below show 8 evenly-spaced example windows
+sampled from that same series, with any real-anomaly overlap shaded there
+too. Test-only, not train -- UCR's real anomaly is always confined to the
+test portion (loaders/load.py's load_anomaly_archive never builds a label
+array for group='train'), so a train-portion plot would have nothing to
+highlight and add little value.
 
 No model, no caching, no sharding needed -- pure data loading + plotting,
 cheap enough for a single process even across ~247 entities.
@@ -22,7 +25,6 @@ import os
 import sys
 
 import pandas as pd
-from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,6 +32,7 @@ from loaders.load import load_anomaly_archive
 import local_diagnostic_curves as ldc
 
 DATASET = 'anomaly_archive'
+WINDOW_SIZE = 100
 GROUP_PREDICATES = [
     ('Red_BAD', lambda gap, thr: gap >= thr),
     ('Green_GOOD', lambda gap, thr: gap <= 0),
@@ -80,15 +83,8 @@ def run():
                 labels = test_ds.entities[0].labels.reshape(-1)
                 spans = ldc.find_anomaly_segments(labels, max_segments=5)
 
-                fig, ax = plt.subplots(figsize=(11, 3))
-                ax.plot(raw, color='#333333', linewidth=0.8)
-                for span_start, span_end in spans:
-                    ax.axvspan(span_start, span_end, color='#e34948', alpha=0.15)
-                ax.set_title(f'{entity} (gap={gap:.3f})', fontsize=10)
-                ax.set_xlabel('timestep')
-                fig.tight_layout()
-                pdf.savefig(fig)
-                plt.close(fig)
+                ldc.plot_entity_gallery_page(pdf, raw, WINDOW_SIZE, title=f'{entity} (gap={gap:.3f})',
+                                              real_anomaly_spans=spans)
                 n_written += 1
         print(f'Wrote {out_path} ({n_written} pages)')
 
