@@ -41,9 +41,12 @@ reliably OOMs once num_shards gets past a handful (each process's context
 alone can be several hundred MB, on top of whatever memory other jobs on
 the box are already holding).
 
-Supports --shard_index/--num_shards (writes one PDF per shard,
-"..._shard{i}.pdf") for splitting the ~250-entity sweep across concurrent
-processes if a single-process run turns out too slow in practice.
+Writes one PDF PER ENTITY (UCR_Test_{entity}.pdf under --out_dir), not one
+per shard -- makes it fast to jump straight to a specific entity that
+looked bad without having to search through a big multi-entity file.
+--shard_index/--num_shards split the ENTITY list across concurrent
+processes (see run_ucr_test_diagnostics_parallel.py); since each entity's
+file is independent, shards never collide and no merge step is needed.
 """
 import argparse
 import os
@@ -86,7 +89,7 @@ def run():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--cross_anomsim_model_dir', default=None,
                          help='Defaults to ./result/Experiment_1/Models/Cross-AnomSim/{seed}')
-    parser.add_argument('--out_pdf', default='./result/DS_3/test_diagnostics/UCR_Test_anomaly_inference_samples.pdf')
+    parser.add_argument('--out_dir', default='./result/DS_3/test_diagnostics')
     parser.add_argument('--cache_dir', default='./result/DS_3/curves_cache/test')
     parser.add_argument('--shard_index', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=1)
@@ -105,53 +108,50 @@ def run():
         entities = [e for i, e in enumerate(entities) if i % args.num_shards == args.shard_index]
     print(f'{len(entities)} entities to process (shard {args.shard_index}/{args.num_shards})')
 
-    out_path = args.out_pdf
-    if args.num_shards > 1:
-        base, ext = os.path.splitext(args.out_pdf)
-        out_path = f'{base}_shard{args.shard_index}{ext}'
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    with PdfPages(out_path) as pdf:
-        for entity in entities:
-            try:
-                self_model_dir, disk_cfg = ci.discover_entity(args.run_name, DATASET, entity, args.seed)
-            except FileNotFoundError:
-                print(f'[skip] {entity}: no self model found')
-                continue
-            window_size = disk_cfg['window_size']
+    for entity in entities:
+        try:
+            self_model_dir, disk_cfg = ci.discover_entity(args.run_name, DATASET, entity, args.seed)
+        except FileNotFoundError:
+            print(f'[skip] {entity}: no self model found')
+            continue
+        window_size = disk_cfg['window_size']
 
-            def compute_self():
-                result = frm.score_entity(args.run_name, DATASET, entity, args.seed, params, device,
-                                           model_dir=self_model_dir, include_curves=True)
-                return {k: result[k] for k in CURVE_KEYS} if result is not None else None
+        def compute_self():
+            result = frm.score_entity(args.run_name, DATASET, entity, args.seed, params, device,
+                                       model_dir=self_model_dir, include_curves=True)
+            return {k: result[k] for k in CURVE_KEYS} if result is not None else None
 
-            def compute_cross():
-                result = frm.score_entity(args.run_name, DATASET, entity, args.seed, params, device,
-                                           model_dir=cross_anomsim_model_dir, include_curves=True)
-                return {k: result[k] for k in CURVE_KEYS} if result is not None else None
+        def compute_cross():
+            result = frm.score_entity(args.run_name, DATASET, entity, args.seed, params, device,
+                                       model_dir=cross_anomsim_model_dir, include_curves=True)
+            return {k: result[k] for k in CURVE_KEYS} if result is not None else None
 
-            self_curves = get_curves_cached(os.path.join(args.cache_dir, f'{entity}_self.npz'), compute_self, args.force)
-            if self_curves is None:
-                print(f'[skip] {entity}: Self scoring failed/unavailable')
-                continue
-            cross_curves = get_curves_cached(os.path.join(args.cache_dir, f'{entity}_cross_anomsim.npz'), compute_cross, args.force)
-            if cross_curves is None:
-                print(f'[skip] {entity}: Cross-AnomSim scoring failed/unavailable')
-                continue
+        self_curves = get_curves_cached(os.path.join(args.cache_dir, f'{entity}_self.npz'), compute_self, args.force)
+        if self_curves is None:
+            print(f'[skip] {entity}: Self scoring failed/unavailable')
+            continue
+        cross_curves = get_curves_cached(os.path.join(args.cache_dir, f'{entity}_cross_anomsim.npz'), compute_cross, args.force)
+        if cross_curves is None:
+            print(f'[skip] {entity}: Cross-AnomSim scoring failed/unavailable')
+            continue
 
-            real_segments = ldc.find_anomaly_segments(self_curves['real_labels'], max_segments=5)
-            self_extremes = ldc.pick_extreme_positions(self_curves, window_size)
-            cross_extremes = ldc.pick_extreme_positions(cross_curves, window_size)
+        real_segments = ldc.find_anomaly_segments(self_curves['real_labels'], max_segments=5)
+        self_extremes = ldc.pick_extreme_positions(self_curves, window_size)
+        cross_extremes = ldc.pick_extreme_positions(cross_curves, window_size)
 
-            labeled_positions = [((s + e) // 2, 'real anomaly') for s, e in real_segments]
-            labeled_positions += [(idx, f'Self {name}') for name, idx in self_extremes.items()]
-            labeled_positions += [(idx, f'Cross-AnomSim {name}') for name, idx in cross_extremes.items()]
-            merged = ldc.merge_nearby_positions(labeled_positions, window_size)
+        labeled_positions = [((s + e) // 2, 'real anomaly') for s, e in real_segments]
+        labeled_positions += [(idx, f'Self {name}') for name, idx in self_extremes.items()]
+        labeled_positions += [(idx, f'Cross-AnomSim {name}') for name, idx in cross_extremes.items()]
+        merged = ldc.merge_nearby_positions(labeled_positions, window_size)
 
-            self_model = ldc.load_convaec_model(self_model_dir, params, device)
-            Y = self_curves['raw_series'][None, :]  # (1, n_time) -- real test signal, same for both models
-            real_labels = self_curves['real_labels']
+        self_model = ldc.load_convaec_model(self_model_dir, params, device)
+        Y = self_curves['raw_series'][None, :]  # (1, n_time) -- real test signal, same for both models
+        real_labels = self_curves['real_labels']
 
+        out_path = os.path.join(args.out_dir, f'UCR_Test_{entity}.pdf')
+        with PdfPages(out_path) as pdf:
             for center, labels in merged:
                 focus_start = center - window_size // 2
                 focus_end = focus_start + window_size
@@ -175,9 +175,9 @@ def run():
                     local_focus_start, local_focus_start + window_size, window_size,
                     title=f'{entity} | ' + ', '.join(labels),
                     real_anomaly_spans=local_real_segments)
-            print(f'  {entity}: {len(merged)} page(s)')
+        print(f'  Wrote {out_path} ({len(merged)} page(s))')
 
-    print(f'Wrote {out_path}')
+    print('Done.')
 
 
 if __name__ == '__main__':

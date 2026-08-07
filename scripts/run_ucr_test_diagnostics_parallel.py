@@ -3,12 +3,11 @@ Runs build_ucr_test_diagnostics.py as N concurrent subprocesses, each over a
 disjoint shard of the full UCR entity list (index % num_shards ==
 shard_index, handled by that script's own --shard_index/--num_shards).
 
-That script already writes one PDF PER SHARD when --num_shards > 1
-("..._shard{i}.pdf"), so shards never collide and there's no merge step --
-just launch and wait. The result is --num_shards separate PDF files
-covering disjoint entities; open whichever you need, or merge them
-yourself later if you want one file (not done here -- no PDF-merging
-dependency in this repo).
+That script writes one PDF PER ENTITY (UCR_Test_{entity}.pdf under
+--out_dir), not one per shard -- so a specific entity that looked bad can
+be opened directly instead of searching through a big multi-entity file.
+Shards never collide (disjoint entities) and there's no merge step -- just
+launch and wait.
 
 build_ucr_test_diagnostics.py runs on CPU (no --gpu here) -- with many
 concurrent shards it previously defaulted every shard onto the same GPU,
@@ -47,14 +46,13 @@ def run():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=8)
     parser.add_argument('--cross_anomsim_model_dir', default=None)
-    parser.add_argument('--out_pdf', default='./result/DS_3/test_diagnostics/UCR_Test_anomaly_inference_samples.pdf')
+    parser.add_argument('--out_dir', default='./result/DS_3/test_diagnostics')
     parser.add_argument('--cache_dir', default='./result/DS_3/curves_cache/test')
     parser.add_argument('--force', action='store_true',
                          help='Passed through to every shard -- recompute everything instead of resuming.')
     args = parser.parse_args()
 
-    out_dir = os.path.dirname(args.out_pdf) or '.'
-    log_dir = os.path.join(out_dir, 'logs')
+    log_dir = os.path.join(args.out_dir, 'logs')
     os.makedirs(log_dir, exist_ok=True)
     env = shard_env(args.num_shards)
     print(f'Capping each shard to OMP/MKL_NUM_THREADS={env["OMP_NUM_THREADS"]} '
@@ -65,7 +63,7 @@ def run():
         cmd = [sys.executable, SCRIPT_PATH,
                '--run_name', args.run_name, '--seed', str(args.seed),
                '--shard_index', str(i), '--num_shards', str(args.num_shards),
-               '--out_pdf', args.out_pdf, '--cache_dir', args.cache_dir]
+               '--out_dir', args.out_dir, '--cache_dir', args.cache_dir]
         if args.cross_anomsim_model_dir:
             cmd += ['--cross_anomsim_model_dir', args.cross_anomsim_model_dir]
         if args.force:
@@ -87,8 +85,7 @@ def run():
     if failed:
         print(f'WARNING: shard(s) {failed} failed -- check {log_dir}/shard{{i}}.log.')
     else:
-        base, ext = os.path.splitext(args.out_pdf)
-        print(f'All {args.num_shards} shards completed: {base}_shard0{ext} .. {base}_shard{args.num_shards - 1}{ext}')
+        print(f'All {args.num_shards} shards completed. PDFs are in {args.out_dir}')
 
 
 if __name__ == '__main__':
