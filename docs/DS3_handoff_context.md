@@ -210,23 +210,35 @@ score 패널엔 TSB_UAD의 RF threshold(`mean(score)+3*std(score)`, self/cross �
 - Test 스크립트를 shard당 1개 PDF에서 entity당 1개 PDF(`UCR_Test_{entity}.pdf`)로 바꿈
   (커밋 `48e2734`) — train/val 두 스크립트와 동일한 컨벤션이 됨. "못한 entity를 스크린샷으로
   빨리 찾아서 검토하고 싶다"는 요청이 이유.
-- **[최신, 아직 커밋 전일 수 있음]** UCR test 진단 플롯을 "로컬 청크 재계산" 방식에서
-  "whole-split 공식 스코어 그대로 사용" 방식으로 되돌림 -- 4절의 "UCR test는 이 로컬 청크
-  방식을 다시 되돌렸다" 부분 참고. `plot_diagnostic_page`에 `threshold`(RF threshold 점선)
-  지원과 `focus_start=0,focus_end=len(series)`일 때 context/focus 구분 생략하는 기능을
-  추가했고, `build_ucr_test_diagnostics.py`를 entity당 1페이지로 대폭 단순화했으며,
-  이제 안 쓰는 `pick_extreme_positions`/`merge_nearby_positions`를 `local_diagnostic_curves.py`
-  에서 삭제함. 로컬에서 mock 데이터로 검증 완료 (실제 UCR 원본 데이터가 로컬에 없어서 실
-  데이터 검증은 서버에서 필요). **커밋 여부는 사용자에게 확인 필요** -- 이 저장소는 명시적
-  요청 없이는 커밋/푸시하지 않는 컨벤션이므로, `git log`/`git status`로 실제 커밋됐는지
-  확인부터 할 것.
-- 사용자가 원래 요청했던 별개 작업(보류 중): DS_3 안에 AnomSim_v1 144개 entity 전체
-  플롯(1개 PDF) + UCR Red(BAD)/Green(GOOD)/기타 3그룹별 entity 플롯+실제 anomaly 하이라이트
-  (그룹당 train/test 각각, 총 6개) -- 위 test 되돌리기 작업 때문에 잠시 보류됐었음. 상세
-  설계는 `/Users/sokim/.claude/plans/concurrent-petting-naur.md`의 "[보류]" 표시된 부분에
-  그대로 남아있음 (Red/Green 분류는 `result/Experiment_2/Results/ucr_results.xlsx`의
-  `VUS_ROC_self`/`VUS_ROC_cross_anomsim` 갭 기준, `scripts/plot_self_vs_cross_anomsim_scatter.py`
-  로직 재사용).
+- UCR test 진단 플롯을 "로컬 청크 재계산" 방식에서 "whole-split 공식 스코어 그대로 사용"
+  방식으로 되돌림 (커밋 `6cf3402`) -- 4절의 "UCR test는 이 로컬 청크 방식을 다시 되돌렸다"
+  부분 참고. `plot_diagnostic_page`에 `threshold`(RF threshold 점선) 지원과
+  `focus_start=0,focus_end=len(series)`일 때 context/focus 구분 생략하는 기능을 추가했고,
+  `build_ucr_test_diagnostics.py`를 entity당 1페이지로 대폭 단순화했으며, 이제 안 쓰는
+  `pick_extreme_positions`/`merge_nearby_positions`를 `local_diagnostic_curves.py`에서
+  삭제함.
+- `build_ucr_test_diagnostics.py`에 "랜덤 윈도우 인스펙터" 페이지 4개(페이지당 10개, entity당
+  총 40개) 추가 (커밋 `82195bd`) -- 샘플링한 윈도우 하나마다 self/cross 모델을 그 윈도우
+  하나에만 fresh하게 다시 통과시켜서(배치=1), 그 윈도우 전체에 대한 실제 재구성을 보여줌
+  (panel 1의 "마지막 timestep만 이어붙인" 근사가 아니라 진짜 값). `local_diagnostic_curves.
+  plot_window_inspector_page`가 이 로직. panel 1.25(pointwise)와 panel 1.5(윈도우 평균)가
+  서로 다른 모델을 "더 나쁘다"고 가리키는 모순을 진단하는 용도 (오차가 윈도우 끝에 몰려있는지
+  vs 골고루 퍼져있는지 직접 확인).
+- AnomSim_v1 144개 entity 전체 플롯(1개 PDF, `scripts/build_anomsim_entity_gallery.py`) +
+  UCR Red(BAD)/Green(GOOD)/Other 3그룹별 entity 플롯+실제 anomaly 하이라이트
+  (`scripts/build_ucr_group_galleries.py`, test만, train은 제외하기로 확정 -- UCR train은
+  실제 anomaly가 절대 없어서 하이라이트할 게 없음) 완성. 총 4개 PDF
+  (`AnomSim_all_entities.pdf`, `UCR_Red_BAD_test.pdf`, `UCR_Green_GOOD_test.pdf`,
+  `UCR_Other_test.pdf`, 전부 `result/DS_3/entity_galleries/` 아래). Red/Green/Other 분류는
+  `result/Experiment_2/Results/ucr_results.xlsx`의 `VUS_ROC_self`/`VUS_ROC_cross_anomsim`
+  갭 기준(`scripts/plot_self_vs_cross_anomsim_scatter.py`와 동일 로직 포팅) -- 로컬에서 실제
+  xlsx로 그룹 분류(33/50/164, 총 247 정확히 일치) 검증 완료, AnomSim은 실제 데이터로 144페이지
+  전부 검증 완료, UCR 쪽 플롯은 로컬에 원본 데이터가 없어서 mock으로 페이지 수/좌표만 검증
+  (서버에서 실 데이터로 재확인 필요). 두 스크립트 다 모델/캐싱/샤딩 불필요 (순수 데이터 로딩+
+  플롯이라 가벼움, 단일 프로세스로 충분).
+- **커밋 여부는 항상 사용자에게 확인 필요** -- 이 저장소는 명시적 요청 없이는 커밋/푸시하지
+  않는 컨벤션이므로, 작업을 이어받았다면 `git log`/`git status`로 실제 커밋됐는지 먼저
+  확인할 것.
 - 서버에서 캐시 재실행 시 참고: train/val 캐시(`result/DS_3/curves_cache/{self,anomsim}`)는
   스키마가 예전과 다르므로 지우고 새로 돌려야 하지만, test 캐시(`result/DS_3/curves_cache/test`)
   는 이번 되돌리기로 스키마가 전혀 안 바뀌었으므로(원래부터 whole-split `{entity}_self.npz`
