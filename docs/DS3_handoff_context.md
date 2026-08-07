@@ -149,9 +149,12 @@ pointwise 절대오차(정규화 없음), 1.5)MSE(raw) 윈도우평균오차(정
 로컬 재계산한다.
 
 **캐싱**: entity당, split당, type당, sample당 `.npz` 하나(`{entity}_{split}_{type}_s{i}.npz`
-형식). Train/val PDF는 entity당 1개 파일(`Self_Train_{entity}.pdf` 등), 12섹션(Normal+11타입)
-×5샘플=60페이지. Test는 entity당 최대 9페이지, `--num_shards`로 쪼갤 때 파일별로 나뉘어서
-병합 단계가 필요 없음(entity가 겹치지 않으므로).
+형식). PDF는 3개 스크립트 전부 entity당 1개 파일(`Self_Train_{entity}.pdf`,
+`AnomSim_Train_{entity_dir}.pdf`, `UCR_Test_{entity}.pdf`) — Test도 원래는 shard당 1개
+파일(여러 entity를 한 파일에 몰아넣음)이었는데, "못한 entity를 빨리 찾아서 검토하고 싶다"는
+요청으로 entity당 1개로 바꿈(커밋 `48e2734`). Train/val은 12섹션(Normal+11타입)×5샘플=60페이지,
+Test는 entity당 최대 9페이지. `--num_shards`로 쪼개도 entity가 겹치지 않으므로 병합 단계가
+필요 없음.
 
 ## 5. 이번 세션에서 고친 실제 버그들 (참고용)
 
@@ -192,8 +195,10 @@ pointwise 절대오차(정규화 없음), 1.5)MSE(raw) 윈도우평균오차(정
 ## 7. 현재 상태 / 다음에 할 일
 
 - 위 재설계(로컬 청크 방식 + 배치 추론)는 로컬에서 실제 데이터(AnomSim 실제 체크포인트 +
-  실제 데이터)와 합성 mock 데이터로 검증 완료, 커밋 `cf133be`로 커밋+푸시됨(origin/main과
-  일치 확인됨).
+  실제 데이터)와 합성 mock 데이터로 검증 완료, 커밋 `cf133be`로 커밋+푸시됨.
+- Test 스크립트를 shard당 1개 PDF에서 entity당 1개 PDF(`UCR_Test_{entity}.pdf`)로 바꿈
+  (커밋 `48e2734`) — train/val 두 스크립트와 동일한 컨벤션이 됨. "못한 entity를 스크린샷으로
+  빨리 찾아서 검토하고 싶다"는 요청이 이유.
 - 사용자가 서버에서 캐시(`result/DS_3/curves_cache/{self,anomsim,test}`) 삭제 후 3개
   오케스트레이터를 전체 entity에 대해 다시 돌릴 예정. 명령어는 이 문서 작성 직전 대화에서
   전달함 (`run_self_train_val_diagnostics_parallel.py --run_name test --num_shards 32` 등,
