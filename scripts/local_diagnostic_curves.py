@@ -242,37 +242,6 @@ def build_local_chunk(Y, focus_start, focus_end, inject_fn=None):
     return chunk, local_focus_start, spans
 
 
-def pick_extreme_positions(curves, window_size):
-    """argmax/argmin of mse_score and ce_score, restricted to real
-    (non-zero-padded) positions -- the first window_size-1 entries are fake
-    zeros from alignment padding, not real data, and must be excluded or
-    argmin would trivially always land there."""
-    offset = window_size - 1
-    mse = curves['mse_score'][offset:]
-    ce = curves['ce_score'][offset:]
-    return dict(
-        mse_argmax=int(np.argmax(mse)) + offset,
-        mse_argmin=int(np.argmin(mse)) + offset,
-        ce_argmax=int(np.argmax(ce)) + offset,
-        ce_argmin=int(np.argmin(ce)) + offset,
-    )
-
-
-def merge_nearby_positions(labeled_positions, window_size):
-    """labeled_positions: list of (timestep, criterion_label). Positions
-    within window_size of each other (i.e. their highlighted windows would
-    overlap/be redundant to show as separate pages) are merged into one,
-    combining criterion labels into a single page title."""
-    ordered = sorted(labeled_positions, key=lambda lp: lp[0])
-    merged = []
-    for pos, label in ordered:
-        if merged and pos - merged[-1][0] < window_size:
-            merged[-1] = (merged[-1][0], merged[-1][1] + [label])
-        else:
-            merged.append((pos, [label]))
-    return merged
-
-
 def display_bounds(focus_start, focus_end, window_size, total_len):
     d0 = max(0, focus_start - 2 * window_size)
     d1 = min(total_len, focus_end + 2 * window_size)
@@ -283,10 +252,16 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
                           title='', real_anomaly_spans=None):
     """raw_series: 1D array, the real/injected input signal (shared across
     all series -- there's only ever one underlying signal per page, even
-    when overlaying 2 models' curves).
+    when overlaying 2 models' curves). Pass focus_start=0, focus_end=len(raw_series)
+    for a "whole series, no local zoom" page (build_ucr_test_diagnostics.py) --
+    display_bounds then spans the entire series and the redundant "context"
+    line/legend entry is skipped automatically (in_focus covers everything).
     series_list: list of dict(label, color, reconstruction, mse_score,
-    ce_score, score, mse_raw) -- one dict per model (1 for Self/AnomSim-only
-    pages, 2 for Self+Cross-AnomSim overlay on Test pages).
+    ce_score, score, mse_raw, threshold) -- one dict per model (1 for
+    Self/AnomSim-only pages, 2 for Self+Cross-AnomSim overlay on Test pages).
+    threshold is optional: if given, drawn as a dotted horizontal line on the
+    final anomaly-score panel only (e.g. TSB_UAD's RF threshold, mean(score)
+    + 3*std(score) over that series' own score array).
     real_anomaly_spans: optional list of (start, end) to shade in every panel.
 
     6 panels, in order:
@@ -306,17 +281,19 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
             convolve_minmax_score. Each is independently min-max normalized
             to [0,1] over whatever curve was actually passed in as `series`
             -- for build_self_train_val_diagnostics.py/
-            build_anomsim_train_val_diagnostics.py/build_ucr_test_diagnostics.py
-            that's the small LOCAL chunk built by build_local_chunk (this
-            focus window + its context), NOT the entity's whole split, so
-            scores are only comparable WITHIN one page, not across pages --
-            each page is its own self-contained min-max range (compare
-            against panel 1.25/1.5 for the unnormalized picture, which IS
-            comparable across pages). Smoothing also changes the shape, not
-            just the scale, versus panels 1.25/1.5 -- it's a literal
-            box-convolution low-pass filter, so sharp local spikes get
-            attenuated/widened. Fixed y-axis [0,1] for comparability across
-            pages despite the per-page normalization."""
+            build_anomsim_train_val_diagnostics.py that's the small LOCAL
+            chunk built by build_local_chunk (this focus window + its
+            context), so scores are only comparable WITHIN one page,  not
+            across pages (compare against panel 1.25/1.5 for the
+            unnormalized picture, which IS comparable across pages). For
+            build_ucr_test_diagnostics.py the whole test split is passed in
+            instead (matching the official RedLamp/TSB_UAD evaluation
+            convention exactly, including its mean+3*std threshold), so
+            those scores ARE the real published-metric values, comparable
+            across entities. Smoothing also changes the shape, not just the
+            scale, versus panels 1.25/1.5 -- it's a literal box-convolution
+            low-pass filter, so sharp local spikes get attenuated/widened.
+            Fixed y-axis [0,1] for comparability across pages."""
     total_len = len(raw_series)
     d0, d1 = display_bounds(focus_start, focus_end, window_size, total_len)
     x = np.arange(d0, d1)
@@ -334,8 +311,14 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
     # consecutive points in whatever's passed to plot(), and boolean masking
     # makes the two context sub-arrays adjacent even though there's a real
     # gap between them).
-    ax_raw.plot(x, raw_slice, color='#888888', linewidth=1.0, label='context (raw)')
-    ax_raw.plot(x[in_focus], raw_slice[in_focus], color='#1f77b4', linewidth=1.4, label='focus window (raw)')
+    # If the focus window covers the ENTIRE display range (e.g. focus_start=0,
+    # focus_end=len(raw_series) for a whole-series page), the "focus" line
+    # would draw directly on top of the "context" line and completely hide
+    # it -- skip the redundant context line/legend entry in that case.
+    if not in_focus.all():
+        ax_raw.plot(x, raw_slice, color='#888888', linewidth=1.0, label='context (raw)')
+    ax_raw.plot(x[in_focus], raw_slice[in_focus], color='#1f77b4', linewidth=1.4,
+                label='focus window (raw)' if not in_focus.all() else 'raw')
     recon_colors = ['#e0883f', '#3fae59']
     for i, s in enumerate(series_list):
         color = s.get('color', recon_colors[i % len(recon_colors)])
@@ -362,6 +345,16 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
             ax.plot(x, s[key][d0:d1], color=color, linewidth=1.1, alpha=0.9, label=s['label'])
         ax.set_ylabel(ylabel)
         ax.set_ylim(0, 1)
+
+    # Optional per-series threshold (e.g. TSB_UAD's RF threshold, mean(score)
+    # + 3*std(score) over that series' own score array) drawn on the final
+    # blended anomaly-score panel only.
+    for i, s in enumerate(series_list):
+        if s.get('threshold') is None:
+            continue
+        color = s.get('color', recon_colors[i % len(recon_colors)])
+        ax_score.axhline(s['threshold'], color=color, linewidth=1.0, linestyle=':',
+                          alpha=0.8, label=f"{s['label']} threshold")
 
     for span_start, span_end in (real_anomaly_spans or []):
         for ax in all_axes:

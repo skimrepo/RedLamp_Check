@@ -141,20 +141,31 @@ pointwise 절대오차(정규화 없음), 1.5)MSE(raw) 윈도우평균오차(정
 
 **성능**: 원래 (entity, split, type)당 한 번의 거대한 whole-split dense pass를 돌려서 5개
 샘플 페이지를 "공짜로" 슬라이싱하는 설계였는데, 사용자가 "focus window+context를 개별
-시계열처럼 취급하고 싶다"고 재설계를 요청해서 지금 방식으로 바뀜. 대신 모델 forward pass는
-`compute_dense_curves_batch`로 한 split의 최대 60개(type×sample) 조합을 한 번의 배치 호출로
-묶어서 처리(Python/dispatch 오버헤드 절감, 수치적으로 개별 호출과 완전히 동일함을 테스트로
-확인함). UCR test는 포지션 선정(진짜 anomaly 구간 + Self/Cross의 mse/ce argmax/argmin, 최대
-9개/entity, 겹치면 병합)은 여전히 whole-split `score_entity` 결과를 쓰고, 그림 그릴 때만
-로컬 재계산한다.
+시계열처럼 취급하고 싶다"고 재설계를 요청해서 지금 방식으로 바뀜(Self/AnomSim train/val만
+해당). 모델 forward pass는 `compute_dense_curves_batch`로 한 split의 최대 60개(type×sample)
+조합을 한 번의 배치 호출로 묶어서 처리(Python/dispatch 오버헤드 절감, 수치적으로 개별 호출과
+완전히 동일함을 테스트로 확인함).
 
-**캐싱**: entity당, split당, type당, sample당 `.npz` 하나(`{entity}_{split}_{type}_s{i}.npz`
-형식). PDF는 3개 스크립트 전부 entity당 1개 파일(`Self_Train_{entity}.pdf`,
-`AnomSim_Train_{entity_dir}.pdf`, `UCR_Test_{entity}.pdf`) — Test도 원래는 shard당 1개
-파일(여러 entity를 한 파일에 몰아넣음)이었는데, "못한 entity를 빨리 찾아서 검토하고 싶다"는
-요청으로 entity당 1개로 바꿈(커밋 `48e2734`). Train/val은 12섹션(Normal+11타입)×5샘플=60페이지,
-Test는 entity당 최대 9페이지. `--num_shards`로 쪼개도 entity가 겹치지 않으므로 병합 단계가
-필요 없음.
+**UCR test는 이 로컬 청크 방식을 다시 되돌렸다(중요, 최근 변경)**: 실제 RedLamp 공식 평가
+파이프라인(`datautils.py`의 `group='test_all'`, `window_step=1`)을 확인해보니 겹치는 윈도우를
+평균내지 않고 "마지막 timestep 정렬 + 앞부분 0-패딩"만 하며, `mse_score`/`ce_score`/`score`의
+스무딩+정규화는 **test split 전체** 기준으로 한 번에 계산된다(로컬로 잘라서 다시 정규화하면
+공식 지표와 다른 값이 나옴). 그래서 `build_ucr_test_diagnostics.py`는 `score_entity`가 만든
+whole-split 커브를 그대로 써서 **entity당 1페이지**로 test 전체를 그린다(예전엔 위치별로
+최대 9페이지였는데, 이제 모든 패널이 전체 기준이라 위치별로 나눌 의미가 없어져서 통합함).
+real anomaly 구간만 음영 표시하고(self/cross의 mse/ce argmax·argmin 마커는 제거), Anomaly
+score 패널엔 TSB_UAD의 RF threshold(`mean(score)+3*std(score)`, self/cross 각자 자기 score
+배열 기준)를 점선으로 추가했다. Train/Val(Self, AnomSim)의 로컬 청크 설계는 안 바뀜 — 거긴
+애초에 진짜 anomaly가 아니라 주입된 걸 보여주는 용도라 이 문제와 무관.
+
+**캐싱**: Train/val은 entity당·split당·type당·sample당 `.npz` 하나
+(`{entity}_{split}_{type}_s{i}.npz` 형식). Test는 캐시 포맷 변경 없음 —
+`{entity}_self.npz`/`{entity}_cross_anomsim.npz`(whole-split 커브 그대로). PDF는 3개
+스크립트 전부 entity당 1개 파일(`Self_Train_{entity}.pdf`, `AnomSim_Train_{entity_dir}.pdf`,
+`UCR_Test_{entity}.pdf`) — Test도 원래는 shard당 1개 파일(여러 entity를 한 파일에
+몰아넣음)이었는데, "못한 entity를 빨리 찾아서 검토하고 싶다"는 요청으로 entity당 1개로
+바꿨다(커밋 `48e2734`). Train/val은 12섹션(Normal+11타입)×5샘플=60페이지, Test는 entity당
+**1페이지**. `--num_shards`로 쪼개도 entity가 겹치지 않으므로 병합 단계가 필요 없음.
 
 ## 5. 이번 세션에서 고친 실제 버그들 (참고용)
 
@@ -199,11 +210,27 @@ Test는 entity당 최대 9페이지. `--num_shards`로 쪼개도 entity가 겹�
 - Test 스크립트를 shard당 1개 PDF에서 entity당 1개 PDF(`UCR_Test_{entity}.pdf`)로 바꿈
   (커밋 `48e2734`) — train/val 두 스크립트와 동일한 컨벤션이 됨. "못한 entity를 스크린샷으로
   빨리 찾아서 검토하고 싶다"는 요청이 이유.
-- 사용자가 서버에서 캐시(`result/DS_3/curves_cache/{self,anomsim,test}`) 삭제 후 3개
-  오케스트레이터를 전체 entity에 대해 다시 돌릴 예정. 명령어는 이 문서 작성 직전 대화에서
-  전달함 (`run_self_train_val_diagnostics_parallel.py --run_name test --num_shards 32` 등,
-  3개를 순서대로 돌리는 걸 추천했음 — 동시에 돌리면 코어 예산이 오버라이드가 안 돼서 대략
-  3배 오버서브스크립션이 생기지만 심각한 수준은 아님).
+- **[최신, 아직 커밋 전일 수 있음]** UCR test 진단 플롯을 "로컬 청크 재계산" 방식에서
+  "whole-split 공식 스코어 그대로 사용" 방식으로 되돌림 -- 4절의 "UCR test는 이 로컬 청크
+  방식을 다시 되돌렸다" 부분 참고. `plot_diagnostic_page`에 `threshold`(RF threshold 점선)
+  지원과 `focus_start=0,focus_end=len(series)`일 때 context/focus 구분 생략하는 기능을
+  추가했고, `build_ucr_test_diagnostics.py`를 entity당 1페이지로 대폭 단순화했으며,
+  이제 안 쓰는 `pick_extreme_positions`/`merge_nearby_positions`를 `local_diagnostic_curves.py`
+  에서 삭제함. 로컬에서 mock 데이터로 검증 완료 (실제 UCR 원본 데이터가 로컬에 없어서 실
+  데이터 검증은 서버에서 필요). **커밋 여부는 사용자에게 확인 필요** -- 이 저장소는 명시적
+  요청 없이는 커밋/푸시하지 않는 컨벤션이므로, `git log`/`git status`로 실제 커밋됐는지
+  확인부터 할 것.
+- 사용자가 원래 요청했던 별개 작업(보류 중): DS_3 안에 AnomSim_v1 144개 entity 전체
+  플롯(1개 PDF) + UCR Red(BAD)/Green(GOOD)/기타 3그룹별 entity 플롯+실제 anomaly 하이라이트
+  (그룹당 train/test 각각, 총 6개) -- 위 test 되돌리기 작업 때문에 잠시 보류됐었음. 상세
+  설계는 `/Users/sokim/.claude/plans/concurrent-petting-naur.md`의 "[보류]" 표시된 부분에
+  그대로 남아있음 (Red/Green 분류는 `result/Experiment_2/Results/ucr_results.xlsx`의
+  `VUS_ROC_self`/`VUS_ROC_cross_anomsim` 갭 기준, `scripts/plot_self_vs_cross_anomsim_scatter.py`
+  로직 재사용).
+- 서버에서 캐시 재실행 시 참고: train/val 캐시(`result/DS_3/curves_cache/{self,anomsim}`)는
+  스키마가 예전과 다르므로 지우고 새로 돌려야 하지만, test 캐시(`result/DS_3/curves_cache/test`)
+  는 이번 되돌리기로 스키마가 전혀 안 바뀌었으므로(원래부터 whole-split `{entity}_self.npz`
+  형식) **지울 필요 없음** -- 그대로 재사용 가능.
 - 다음 단계로 예상되는 것: 사용자가 서버 결과(PDF들)를 다운받아서 스크린샷으로 추가 시각적
   버그/이상한 패턴을 지적할 가능성이 높음 (지금까지 패턴이 그래왔음). 그때마다 근본 원인을
   찾아서(추측하지 말고 실제 코드/데이터로 검증) 고치고, 로컬에서 재현 가능한 범위에서
