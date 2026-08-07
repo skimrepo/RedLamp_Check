@@ -2,12 +2,25 @@
 Experiment 3 scoring: compare Self_A / Cross_without_E / Cross_without_D
 checkpoints on target domain A's FIXED held-back test instances (see
 AnomSim's scripts/carve_experiment3_fixed_test_ids.py) -- never seen by any
-of the three models during training. One ground-truth anomaly is injected
-into each test instance ONCE, with a fixed injection_seed shared across every
-model being compared (cached to .npz), so all three models are scored
-against byte-identical input -- mirroring how full_reproduction_metrics.
-score_entity scores a real UCR/KPI entity's single ground-truth anomaly
-region, just with AnomSim as the data source instead.
+of the three models during training. Ground-truth anomalies are injected
+into each test instance ONCE (fixed injection_seed shared across every model
+being compared, cached to .npz), so all three models are scored against
+byte-identical input -- mirroring how full_reproduction_metrics.score_entity
+scores a real UCR/KPI entity's own ground-truth anomaly region(s), just with
+AnomSim as the data source instead.
+
+Each injected anomaly is localized to its own window_size-length chunk (the
+same scale the model was trained to recognize -- see
+core_clustering.online_dataset.OnlineWindowedDataset, which injects into
+window_size slices, never a whole entity), with every OTHER chunk left as
+untouched real context -- so a test entity ends up with a handful of
+localized anomaly events separated by real normal stretches, matching real
+UCR/KPI test files' own structure (mostly-normal data with occasional
+anomaly regions), rather than one anomaly spanning an unbounded fraction of
+the whole entity (an earlier version of this script injected directly onto
+the whole entity with default anomaly params, which for region-based types
+like contextual/cutoff/scale could cover 30-60%+ of an entity -- unrealistic
+and part of why RF came out as exactly 0 for every entity/model/seed).
 
 Computes BOTH metric families used elsewhere in this project, so results
 stay in the same units as prior experiments:
@@ -60,22 +73,47 @@ def load_fixed_test_ids(dataset_dir, domain, filename='_experiment3_fixed_test_i
     return all_ids[domain]
 
 
-def build_labeled_test_entity(dataset_dir, domain, base_instance_id, anomaly_types, injection_seed, get_anomaly):
+def build_labeled_test_entity(dataset_dir, domain, base_instance_id, anomaly_types, injection_seed, get_anomaly,
+                               window_size):
     """Loads the domain's stored (already [0,1]-normalized) base series and
-    injects exactly ONE ground-truth anomaly -- type chosen deterministically
-    from (injection_seed, base_instance_id) -- into the WHOLE series,
-    mirroring a real UCR/KPI test entity's single contiguous anomaly region.
-    Fixed seed so every model scored against this entity sees byte-identical
-    input. AnomSim's own mask convention is 0=anomalous/1=normal; TSB-UAD
-    expects the opposite (1=anomalous), hence the inversion below."""
+    injects SEVERAL ground-truth anomalies, each confined to its own
+    window_size-length chunk -- matching the scale anomalies are injected at
+    during training (a window, never a whole entity) -- with every OTHER
+    chunk left as untouched real context, so the result alternates real /
+    anomalous / real / anomalous ... like a real UCR/KPI test file's mostly-
+    normal-with-occasional-events structure, instead of one anomaly able to
+    span an unbounded fraction of the whole entity.
+
+    Deterministic given (injection_seed, base_instance_id) -- every model
+    scored against this entity sees byte-identical input. AnomSim's own mask
+    convention is 0=anomalous/1=normal; TSB-UAD expects the opposite
+    (1=anomalous), hence the inversion below.
+
+    Returns (y_injected, real_labels, anomaly_types_used) where
+    anomaly_types_used is the list of types actually injected, in order."""
     entity_dir = os.path.join(dataset_dir, f'{domain}_b{base_instance_id}')
     Y = np.load(os.path.join(entity_dir, 'Y.npy'))
+    n_time = Y.shape[1]
 
-    rng = np.random.default_rng([injection_seed, int(base_instance_id)])
-    anomaly_type = anomaly_types[int(rng.integers(len(anomaly_types)))]
-    y_injected, _z, mask = get_anomaly(anomaly_type)().apply(Y, rng)
-    real_labels = 1 - np.asarray(mask)[0].astype(int)
-    return np.asarray(y_injected), real_labels, anomaly_type
+    y_injected = Y.copy()
+    real_labels = np.zeros(n_time, dtype=int)
+    anomaly_types_used = []
+
+    n_chunks = n_time // window_size
+    # Chunk 0 is always left real (so every entity has some leading normal
+    # context); every other chunk after that (1, 3, 5, ...) gets one
+    # injected anomaly, confined to that window_size-length span.
+    for chunk_idx in range(1, n_chunks, 2):
+        start = chunk_idx * window_size
+        end = start + window_size
+        rng = np.random.default_rng([injection_seed, int(base_instance_id), chunk_idx])
+        anomaly_type = anomaly_types[int(rng.integers(len(anomaly_types)))]
+        chunk_injected, _z, mask = get_anomaly(anomaly_type)().apply(Y[:, start:end], rng)
+        y_injected[:, start:end] = chunk_injected
+        real_labels[start:end] = 1 - np.asarray(mask)[0].astype(int)
+        anomaly_types_used.append(anomaly_type)
+
+    return y_injected, real_labels, anomaly_types_used
 
 
 def score_model_on_entity(model, device, y_injected, real_labels, window_size):
@@ -148,17 +186,22 @@ def run():
     params.override(main.model_parameters(model_args))
 
     # ---- Build (once) + cache the labeled test entities, shared by every model ----
+    # Cache filename encodes window_size since it now controls the injection
+    # chunking scheme -- an old cache built by a previous (whole-entity)
+    # injection scheme has a different name and is never mistakenly reused.
     labeled = {}
     for base_id in test_ids:
-        cache_path = os.path.join(cache_dir, f'{args.domain}_b{base_id}_labeled_seed{args.injection_seed}.npz')
+        cache_path = os.path.join(
+            cache_dir, f'{args.domain}_b{base_id}_labeled_seed{args.injection_seed}_w{args.window_size}.npz')
         if not args.force and os.path.isfile(cache_path):
             data = np.load(cache_path, allow_pickle=True)
-            labeled[base_id] = (data['y_injected'], data['real_labels'], str(data['anomaly_type']))
+            labeled[base_id] = (data['y_injected'], data['real_labels'], str(data['anomaly_types']).split(','))
             continue
-        y_injected, real_labels, anomaly_type = build_labeled_test_entity(
-            args.dataset_dir, args.domain, base_id, anomaly_types, args.injection_seed, get_anomaly)
-        np.savez(cache_path, y_injected=y_injected, real_labels=real_labels, anomaly_type=anomaly_type)
-        labeled[base_id] = (y_injected, real_labels, anomaly_type)
+        y_injected, real_labels, anomaly_types_used = build_labeled_test_entity(
+            args.dataset_dir, args.domain, base_id, anomaly_types, args.injection_seed, get_anomaly, args.window_size)
+        np.savez(cache_path, y_injected=y_injected, real_labels=real_labels,
+                 anomaly_types=','.join(anomaly_types_used))
+        labeled[base_id] = (y_injected, real_labels, anomaly_types_used)
 
     # ---- Classification-accuracy pool: this domain's fixed test instances only ----
     manifest_path = os.path.join(args.dataset_dir, '_manifest.jsonl')
@@ -177,15 +220,16 @@ def run():
 
         detection_rows = []
         for base_id in test_ids:
-            y_injected, real_labels, anomaly_type = labeled[base_id]
+            y_injected, real_labels, anomaly_types_used = labeled[base_id]
             metrics = score_model_on_entity(model, device, np.asarray(y_injected), np.asarray(real_labels), args.window_size)
             if metrics is None:
                 print(f'  [skip] {model_name}/{args.domain}_b{base_id}: scoring failed')
                 continue
             row = dict(model=model_name, domain=args.domain, base_instance_id=int(base_id),
-                       seed=args.seed, anomaly_type=anomaly_type, **metrics)
+                       seed=args.seed, anomaly_types=','.join(anomaly_types_used),
+                       n_anomaly_events=len(anomaly_types_used), **metrics)
             detection_rows.append(row)
-            print(f'  {model_name}/{args.domain}_b{base_id} ({anomaly_type}): {metrics}')
+            print(f'  {model_name}/{args.domain}_b{base_id} ({anomaly_types_used}): {metrics}')
 
         acc_result = None
         if len(pool.Y) > 0:
