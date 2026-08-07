@@ -47,11 +47,24 @@ independent, shards never collide and no merge step is needed.
 
 Cache format (result/DS_3/curves_cache/test/{entity}_{self,cross_anomsim}.npz)
 is unchanged from before -- existing cached curves are reused as-is.
+
+After the whole-series page, N_INSPECT_PAGES more pages follow (10 randomly
+sampled windows each, WINDOWS_PER_PAGE) -- for each sampled window, both
+models are re-run FRESH on just that single window (see
+local_diagnostic_curves.plot_window_inspector_page) to show the model's true
+reconstruction across the WHOLE window, not the neighbor-window
+approximation the main page's "reconstruction" curve gives. This exists to
+explain apparent contradictions like "panel 1.25 (pointwise, last-timestep-
+only) says Self is worse here, but panel 1.5 (mse_raw, whole-window average)
+says Cross is worse" -- often because one model's error concentrates at a
+window's edges while the other's is spread evenly, which only a per-window
+view (not a last-timestep-only stitched curve) can show directly.
 """
 import argparse
 import os
 import sys
 
+import numpy as np
 import torch
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -66,6 +79,8 @@ import local_diagnostic_curves as ldc
 
 DATASET = 'anomaly_archive'
 CURVE_KEYS = ['raw_series', 'reconstruction', 'mse_score', 'ce_score', 'score', 'real_labels', 'mse_raw']
+WINDOWS_PER_PAGE = 10
+N_INSPECT_PAGES = 4
 
 
 def get_curves_cached(cache_path, compute_fn, force=False):
@@ -109,6 +124,8 @@ def run():
     model_args = ci.build_model_args(dg.CFG, cps.WINDOW_SIZE)
     params = utils.AttrDict(seed=args.seed)
     params.override(main.model_parameters(model_args))
+    cross_model = ldc.load_convaec_model(cross_anomsim_model_dir, params, device)
+    rng = np.random.default_rng(args.seed)
 
     entities = frm.discover_dataset_entities(args.run_name, DATASET)
     if args.num_shards > 1:
@@ -146,6 +163,13 @@ def run():
 
         real_segments = ldc.find_anomaly_segments(self_curves['real_labels'], max_segments=5)
         total_len = len(self_curves['raw_series'])
+        self_model = ldc.load_convaec_model(self_model_dir, params, device)
+
+        valid_start = window_size - 1
+        n_valid = total_len - valid_start
+        n_inspect = min(WINDOWS_PER_PAGE * N_INSPECT_PAGES, n_valid)
+        inspect_positions = np.sort(rng.choice(np.arange(valid_start, total_len), size=n_inspect, replace=False)) \
+            if n_inspect > 0 else np.array([], dtype=int)
 
         out_path = os.path.join(args.out_dir, f'UCR_Test_{entity}.pdf')
         with PdfPages(out_path) as pdf:
@@ -161,6 +185,15 @@ def run():
                       threshold=rf_threshold(cross_curves['score']))],
                 focus_start=0, focus_end=total_len, window_size=window_size,
                 title=entity, real_anomaly_spans=real_segments)
+
+            for page_i in range(N_INSPECT_PAGES):
+                page_positions = inspect_positions[page_i * WINDOWS_PER_PAGE:(page_i + 1) * WINDOWS_PER_PAGE]
+                if len(page_positions) == 0:
+                    continue
+                ldc.plot_window_inspector_page(
+                    pdf, dict(self=self_curves, cross_anomsim=cross_curves),
+                    dict(self=self_model, cross_anomsim=cross_model), device, page_positions, window_size,
+                    title=f'{entity} | random window inspector ({page_i + 1}/{N_INSPECT_PAGES})')
         print(f'  Wrote {out_path}')
 
     print('Done.')

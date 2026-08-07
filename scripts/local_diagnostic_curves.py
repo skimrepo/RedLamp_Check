@@ -373,3 +373,65 @@ def plot_diagnostic_page(pdf, raw_series, series_list, focus_start, focus_end, w
     fig.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
+
+
+def plot_window_inspector_page(pdf, curves_by_model, models_by_label, device, positions, window_size,
+                                title='', n_cols=2):
+    """One page, one subplot per position in `positions` (up to 10 fits a
+    5x2 grid legibly) -- for each position t (the LAST timestep of some
+    dense window), re-runs each model FRESH on just that single window
+    (batch=1) to get its true, exact reconstruction across the WHOLE window
+    (not the neighbor-window approximation panel 1's "reconstruction" curve
+    gives, which only ever shows each window's own LAST-position output
+    stitched together). This is the only way to see whether a model's error
+    concentrates at a window's edges or is spread evenly across it -- e.g.
+    to explain why panel 1.25 (pointwise, last-position-only) and panel 1.5
+    (mse_raw, whole-window average) can disagree about which model does
+    better at a given timestep.
+
+    curves_by_model: dict label -> curves dict (must have raw_series,
+    mse_raw, mse_score, ce_score, score -- the whole-split values already
+    computed for that model, read here only to ANNOTATE each subplot, not
+    recomputed). models_by_label: dict label -> loaded ConvAEC model,
+    same keys as curves_by_model. All models share the same underlying
+    raw_series (real signal, no injection -- built for the UCR test case).
+    positions: iterable of int, each the last timestep of the window to
+    inspect."""
+    positions = list(positions)
+    if not positions:
+        return
+    n_rows = int(np.ceil(len(positions) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.5 * n_cols, 3.2 * n_rows), squeeze=False)
+    axes = axes.flatten()
+    labels = list(curves_by_model.keys())
+    colors = {labels[0]: '#e0883f', labels[1] if len(labels) > 1 else '': '#3fae59'}
+    raw_series = next(iter(curves_by_model.values()))['raw_series']
+
+    for i, (ax, t) in enumerate(zip(axes, positions)):
+        start, end = t - window_size + 1, t + 1
+        raw_window = raw_series[start:end]
+        window_tensor = torch.tensor(raw_window.reshape(1, window_size, 1), dtype=torch.float32)
+        ax.plot(np.arange(start, end), raw_window, color='#333333', linewidth=1.3, label='raw')
+
+        title_lines = [f't={start}-{end - 1}']
+        for label in labels:
+            with torch.no_grad():
+                predicted, _, _ = models_by_label[label](window_tensor.to(device))
+            recon = predicted[0, :, 0].cpu().numpy()
+            ax.plot(np.arange(start, end), recon, color=colors.get(label, '#888888'), linewidth=1.0,
+                    linestyle='--', label=f'{label} recon')
+            c = curves_by_model[label]
+            title_lines.append(f'{label}: MSE_raw={c["mse_raw"][t]:.4f} MSE={c["mse_score"][t]:.2f} '
+                                f'CE={c["ce_score"][t]:.2f} Anom={c["score"][t]:.2f}')
+        ax.set_title('\n'.join(title_lines), fontsize=7)
+        ax.tick_params(labelsize=6)
+        if i == 0:
+            ax.legend(fontsize=6, loc='upper right')
+
+    for ax in axes[len(positions):]:
+        ax.axis('off')
+
+    fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
