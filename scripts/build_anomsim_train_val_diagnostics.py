@@ -65,7 +65,14 @@ def inject_fn_for(get_anomaly, anomaly_type):
     so each of the N_SAMPLES pages gets a genuinely independent instance."""
     def inject(window):
         rng = np.random.default_rng()
-        y, _z, mask = get_anomaly(anomaly_type)().apply(window, rng)
+        # apply() now takes (Y, start, end, rng) since it can receive a wider
+        # array than just the focus window (see AnomSim's own
+        # anomalies/base.py) -- here `window` IS the entire self-contained
+        # chunk build_local_chunk wants injected, so start=0/end=window_size
+        # treats it as its own complete context (matching this script's own
+        # per-sample design: no wider entity context is available or wanted
+        # here).
+        y, _z, mask = get_anomaly(anomaly_type)().apply(window, 0, window.shape[1], rng)
         return np.asarray(y), np.asarray(mask)
     return inject
 

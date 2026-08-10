@@ -108,7 +108,13 @@ def build_labeled_test_entity(dataset_dir, domain, base_instance_id, anomaly_typ
         end = start + window_size
         rng = np.random.default_rng([injection_seed, int(base_instance_id), chunk_idx])
         anomaly_type = anomaly_types[int(rng.integers(len(anomaly_types)))]
-        chunk_injected, _z, mask = get_anomaly(anomaly_type)().apply(Y[:, start:end], rng)
+        # apply() now takes (Y, start, end, rng) since it can receive a wider
+        # array than just its own chunk -- pass start=0/end=window_size to
+        # keep this script's own documented design (each injection strictly
+        # confined to its own chunk, unaffected by neighboring real data)
+        # unchanged.
+        chunk = Y[:, start:end]
+        chunk_injected, _z, mask = get_anomaly(anomaly_type)().apply(chunk, 0, window_size, rng)
         y_injected[:, start:end] = chunk_injected
         real_labels[start:end] = 1 - np.asarray(mask)[0].astype(int)
         anomaly_types_used.append(anomaly_type)

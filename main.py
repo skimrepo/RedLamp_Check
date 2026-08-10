@@ -64,8 +64,6 @@ class REDLAMP:
         self.epoch = params.epoch
         self.device = device
 
-        self.autocast = torch.cuda.amp.autocast()
-        self.scaler = torch.cuda.amp.GradScaler()
         self.model = ConvAEC(self.params).to(self.device)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = self.params.lr)
 
@@ -94,24 +92,25 @@ class REDLAMP:
                 if inputs.shape[0]==1: #BatchNorm of Classifier doesn't work if batchsize=1
                     continue
 
-                with self.autocast:
-                    predicted, pred_label, pred_enc = self.model(inputs)
-                    loss, loss_ae, loss_c = self.model.calculate_loss(inputs, predicted, label, pred_label, anomaly_mask, epoch)
-
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                self.grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.params.max_grad_norm or 1e9)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                predicted, pred_label, pred_enc = self.model(inputs)
+                loss, loss_ae, loss_c = self.model.calculate_loss(inputs, predicted, label, pred_label, anomaly_mask, epoch)
 
                 if torch.isnan(loss).any():
+                    # Matches Core-Clustering's trainer.py::Trainer._run_epoch --
+                    # skip backward entirely on a NaN batch instead of still
+                    # stepping the optimizer on it (which could corrupt weights
+                    # with a NaN/garbage gradient).
                     print(f'Detected NaN loss at epoch {epoch}')
-                    # raise RuntimeError(f'Detected NaN loss at epoch {epoch}')
-                else:
-                    cum_loss += loss.item()
-                    cum_loss_ae += loss_ae.item()
-                    cum_loss_c += loss_c.item()
-                    step_count += 1
+                    continue
+
+                loss.backward()
+                self.grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.params.max_grad_norm or 1e9)
+                self.optimizer.step()
+
+                cum_loss += loss.item()
+                cum_loss_ae += loss_ae.item()
+                cum_loss_c += loss_c.item()
+                step_count += 1
             epoch_loss = cum_loss/step_count
             epoch_loss_ae = cum_loss_ae/step_count
             epoch_loss_c = cum_loss_c/step_count
@@ -169,6 +168,12 @@ class REDLAMP:
 
                 predicted, pred_label, pred_enc = self.model(inputs)
                 loss_aec, loss_ae, loss_c = self.model.calculate_loss(inputs, predicted, label, pred_label, anomaly_mask, epoch)
+                if torch.isnan(loss_aec).any():
+                    # Same NaN-skip as train() -- one bad batch shouldn't turn
+                    # the whole validation average into NaN (matches
+                    # Core-Clustering's unified _run_epoch, used for both
+                    # train and val).
+                    continue
                 loss += loss_aec
                 loss_AE += loss_ae
                 loss_C += loss_c
@@ -408,6 +413,15 @@ def anomaly_scoreing(input, pred, pred_label, threshold=0.05, return_components=
     pred = pred.reshape(B, -1)
     mse_score = mse(input, pred)
     mse_score = convolve_minmax_score(mse_score, w=int(W/2))
+
+    # pred_label is the classifier's raw logits (NonLinClassifier no longer
+    # applies Softmax internally -- see models/classifier.py) -- convert to
+    # probabilities here, the one place that actually needs them, instead of
+    # baking a Softmax into the model (which double-squashed CrossEntropyLoss
+    # gradients during training).
+    pred_label = pred_label - pred_label.max(axis=1, keepdims=True)
+    pred_label = np.exp(pred_label)
+    pred_label = pred_label / pred_label.sum(axis=1, keepdims=True)
 
     mean_label = np.mean(pred_label, axis=0)
     indices = np.where(mean_label > threshold)[0]

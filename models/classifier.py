@@ -20,14 +20,25 @@ class NonLinClassifier(nn.Module):
         self.act = activation
         self.dropout = nn.Dropout(dropout)
         self.dense2 = nn.Linear(d_hidd, n_class)
-        self.output = nn.Softmax(dim=1)
 
-        self.layers = [self.dense1, self.norm, self.act, self.dropout, self.dense2, self.output]
+        # No Softmax here (previously had one) -- CrossEntropyLoss expects raw
+        # logits and applies its own numerically-stable log_softmax internally;
+        # softmaxing before it double-squashed gradients. Matches
+        # Core-Clustering's core_clustering/models.py::NonLinClassifier exactly
+        # (same architecture otherwise, no new/removed learnable parameters,
+        # so state_dicts from either trainer load into either module
+        # unchanged). Call predict_proba() below wherever an actual
+        # probability distribution is needed.
+        self.layers = [self.dense1, self.norm, self.act, self.dropout, self.dense2]
         self.net = nn.Sequential(*[x for x in self.layers if x is not None])
 
     def forward(self, x):
         out = self.net(x)
         return out
+
+
+def predict_proba(logits):
+    return torch.softmax(logits, dim=1)
 
 
 class LinClassifier(nn.Module):
