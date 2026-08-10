@@ -247,3 +247,37 @@ score 패널엔 TSB_UAD의 RF threshold(`mean(score)+3*std(score)`, self/cross �
   버그/이상한 패턴을 지적할 가능성이 높음 (지금까지 패턴이 그래왔음). 그때마다 근본 원인을
   찾아서(추측하지 말고 실제 코드/데이터로 검증) 고치고, 로컬에서 재현 가능한 범위에서
   검증 후 커밋.
+
+## 8. 진행 중인 탐구: UCR "PowerDemand" 도메인 (Red/Green 격차 원인 조사)
+
+DS_2 achievability 분석(섹션 1.5, `result/DS_2/achievability/`)에서 UCR을 도메인별로 나눠보다가,
+**PowerDemand 도메인**(entity 044/045/046/047=DISTORTED, 152/153/154/155=plain -- 실제로는
+PowerDemand1~4라는 4개 원본 녹음이 DISTORTED/plain 두 번씩 등록된 것)이 Red=4, Green=0,
+Other=4로 **Cross-AnomSim이 유독 약한 도메인**이라는 게 눈에 띄어서, 왜 그런지 파고드는 중.
+
+**지금까지 확인한 것**:
+- `result/DS_0/anomaly_archive/{044,046,152}/waveform.png`를 직접 봤을 때, PowerDemand 시계열은
+  **뚜렷한 주기성**이 있음 -- 100포인트 윈도우 안에 약 3~4번의 반복되는 사이클(이중-봉 모양)이
+  보임. 044(DISTORTED PowerDemand1)와 152(plain PowerDemand1)는 파형이 거의 동일 -- 같은 원본
+  녹음의 두 변형이라는 게 시각적으로도 확인됨.
+- **가설(아직 검증 안 됨)**: 전력 수요는 원래 하루 단위로 반복되는 실제 신호라서 이런 깨끗한
+  주기성이 나오는 게 당연함. AnomSim의 합성 도메인(sine/square/random_walk/sawtooth/trend/
+  white_noise/arma/binary_state/quantized_sensor, 9개)이 이 "PowerDemand 특유의 이중-봉 반복
+  패턴"을 잘 못 흉내 내서 Cross-AnomSim이 이 도메인에서 유독 약한 게 아닐까 하는 추측 -- 다만
+  이건 아직 **추측일 뿐, 검증된 사실 아님**.
+- 이 가설을 검증하기 위해 `scripts/train_ucr_leave_one_out.py`를 만듦 (커밋 `d4f73a9`) -- 8개
+  entity 각각을 하나씩 빼고 나머지 7개로 풀링해서 학습한 모델("without_X")을 그 X에 대해
+  테스트, 기존 Self 점수(Experiment_2 xlsx에서 그대로 가져옴)와 비교. 로컬은 UCR 원본 데이터가
+  없어서 mock으로 wiring만 검증했고, **실제 학습/결과는 아직 서버에서 안 돌림** -- 다음 세션이
+  이어받는다면 서버에서 `python scripts/train_ucr_leave_one_out.py --run_name test --seed 0`
+  실행부터 시작하면 됨. 결과는 `result/DS_2/achievability/ucr_leave_one_out.csv`.
+- `scripts/analyze_ucr_domain_groups.py`(커밋 `d4f73a9`)가 도메인별/변형별 Red-Green-Other
+  분류표를 만들어줌 -- PowerDemand 도메인의 정확한 entity 목록/gap 값은 이 스크립트가 만드는
+  `result/DS_2/achievability/ucr_domain_group_analysis.xlsx`의 "By Domain" 시트에서 확인 가능
+  (Red_Entities/Green_Entities/Other_Entities 컬럼에 entity id들이 나열돼 있음).
+
+**다음에 할 일**: LOO 결과가 나오면, "without_X 모델이 X에서 Self보다 훨씬 못한다" +
+"PowerDemand의 주기성" 두 관찰을 연결해서, 실제로 풀링된 모델이 이 주기적 패턴을 못 배우는지
+(예: 윈도우 안의 재구성 곡선이 원본의 주기적 모양을 못 따라가는지) 직접 눈으로 확인해보면 좋을
+것 같음 -- `local_diagnostic_curves.py`의 템플릿들(섹션 4, `docs/plot_templates_guide.md`)을
+재사용해서 without_X 모델의 reconstruction을 그려보면 바로 보일 것.
