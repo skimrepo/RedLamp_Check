@@ -46,9 +46,30 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, 'scripts'))
 
+import cross_inference as ci
+
 DEFAULT_ENTITIES = ['044', '045', '046', '047', '152', '153', '154', '155']
 DEFAULT_SEEDS = [0, 1, 2]
 METRIC_KEYS = ['VUS_ROC', 'VUS_PR', 'R_AUC_ROC', 'R_AUC_PR', 'RF']
+
+
+def preflight_check(run_name, entities, seeds):
+    """score_entity() (see full_reproduction_metrics.py) needs a Self model
+    for the EXACT (run_name, entity, seed) combo to already exist on disk --
+    even when scoring a different model via model_dir= -- purely to read that
+    entity's disk_cfg (window_size/batch_size/etc). This has nothing to do
+    with whether our new LOO/Bimodal training succeeds, so a missing Self
+    seed would otherwise only surface as a silent skip at the very end of the
+    ~9h run. Checking this takes seconds (no GPU, no data loading) and should
+    always run before committing to the expensive stages."""
+    missing = []
+    for entity in entities:
+        for seed in seeds:
+            try:
+                ci.discover_entity(run_name, 'anomaly_archive', entity, seed)
+            except FileNotFoundError:
+                missing.append((entity, seed))
+    return missing
 
 
 def call(module_name, argv):
@@ -77,6 +98,7 @@ def run():
     parser.add_argument('--bimodal_models_dir', default='./result/DS_2/achievability/anomsim_bimodal_models')
     parser.add_argument('--ucr_xlsx', default='./result/Experiment_2/Results/ucr_results.xlsx')
     parser.add_argument('--out_xlsx', default='./result/DS_2/achievability/powerdemand_experiments_summary.xlsx')
+    parser.add_argument('--run_name', default='test', help='Self-model run_name score_entity() needs for disk_cfg lookup')
     parser.add_argument('--force_build', action='store_true')
     parser.add_argument('--force_train', action='store_true')
     parser.add_argument('--skip_build', action='store_true')
@@ -84,9 +106,26 @@ def run():
     parser.add_argument('--skip_score', action='store_true')
     parser.add_argument('--skip_loo', action='store_true')
     parser.add_argument('--skip_bimodal', action='store_true')
+    parser.add_argument('--skip_preflight', action='store_true')
     args = parser.parse_args()
 
     seeds_str = [str(s) for s in args.seeds]
+
+    # -- 0. preflight: catch a missing Self-model seed in seconds, not after
+    # ~9h of training only to find scoring silently skips most rows --
+    if not args.skip_preflight:
+        print(f'=== [preflight] checking Self models exist for run_name={args.run_name!r}, '
+              f'{len(args.entities)} entities x {len(args.seeds)} seeds ===')
+        missing = preflight_check(args.run_name, args.entities, args.seeds)
+        if missing:
+            print(f'[FATAL] {len(missing)} (entity, seed) combo(s) have no discoverable Self model '
+                  f'-- score_entity() will silently skip these even though training will still succeed:')
+            for entity, seed in missing:
+                print(f'    entity={entity} seed={seed}')
+            print('\nEither train the missing Self-model seeds first (see scripts/run_multiseed_training.py), '
+                  'restrict --seeds/--entities to what already exists, or pass --skip_preflight to proceed anyway.')
+            return
+        print('[preflight] OK -- all (entity, seed) combos have a discoverable Self model.')
 
     # -- 1. build pools --
     if not args.skip_build:
@@ -140,14 +179,15 @@ def run():
         if not args.skip_loo:
             print('=== [score] LOO ===')
             call('score_ucr_anomsim_loo', [
-                '--seeds', *seeds_str, '--gpu', str(args.gpu), '--entities', *args.entities,
-                '--ucr_domain_name', args.ucr_domain_name, '--models_dir', args.loo_models_dir,
-                '--ucr_xlsx', args.ucr_xlsx])
+                '--run_name', args.run_name, '--seeds', *seeds_str, '--gpu', str(args.gpu),
+                '--entities', *args.entities, '--ucr_domain_name', args.ucr_domain_name,
+                '--models_dir', args.loo_models_dir, '--ucr_xlsx', args.ucr_xlsx])
         if not args.skip_bimodal:
             print('=== [score] Bimodal ===')
             call('score_anomsim_bimodal_on_powerdemand', [
-                '--seeds', *seeds_str, '--gpu', str(args.gpu), '--entities', *args.entities,
-                '--models_dir', args.bimodal_models_dir, '--ucr_xlsx', args.ucr_xlsx])
+                '--run_name', args.run_name, '--seeds', *seeds_str, '--gpu', str(args.gpu),
+                '--entities', *args.entities, '--models_dir', args.bimodal_models_dir,
+                '--ucr_xlsx', args.ucr_xlsx])
 
     # -- 4. combine --
     print('=== [combine] writing final summary xlsx ===')
