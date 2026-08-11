@@ -192,9 +192,15 @@ def orchestrate(args):
     log_dir = args.log_dir or os.path.join(repo_root, 'logs', 'self_data_efficiency')
     os.makedirs(log_dir, exist_ok=True)
 
-    jobs = [dict(entity=e, n_pct=n, seed=s) for s in args.seeds for n in args.n_pcts for e in args.entities]
+    # n_pct is the outermost/primary sort key (ascending) so ALL smallest-n_pct
+    # jobs (fastest -- least training data, fewest windows) launch before ANY
+    # larger-n_pct job, regardless of seed/entity -- gives quick, complete
+    # low-n_pct results early instead of seed=0's slow n=100 blocking
+    # seed=1/2's fast n=1 jobs from even starting.
+    jobs = [dict(entity=e, n_pct=n, seed=s) for n in sorted(args.n_pcts) for s in args.seeds for e in args.entities]
     print(f'{len(jobs)} jobs queued ({len(args.entities)} entities x {len(args.n_pcts)} n_pcts x '
-          f'{len(args.seeds)} seeds). Running up to {args.max_parallel} at a time on GPU {args.gpu}. '
+          f'{len(args.seeds)} seeds), smallest n_pct first. Running up to {args.max_parallel} at a time on '
+          f'GPU {args.gpu}. '
           f'Logs in {log_dir}/', flush=True)
 
     pending = list(jobs)
