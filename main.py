@@ -111,9 +111,15 @@ class REDLAMP:
                 cum_loss_ae += loss_ae.item()
                 cum_loss_c += loss_c.item()
                 step_count += 1
-            epoch_loss = cum_loss/step_count
-            epoch_loss_ae = cum_loss_ae/step_count
-            epoch_loss_c = cum_loss_c/step_count
+            if step_count == 0:
+                # Matches Core-Clustering's trainer.py::_run_epoch's own
+                # step_count==0 guard -- every batch this epoch was skipped
+                # (all size-1 or all-NaN), so there's nothing to average.
+                epoch_loss = epoch_loss_ae = epoch_loss_c = float('nan')
+            else:
+                epoch_loss = cum_loss/step_count
+                epoch_loss_ae = cum_loss_ae/step_count
+                epoch_loss_c = cum_loss_c/step_count
             epoch_t = time.time() - starttime
             print('Epoch:', epoch, '     loss: ', str(epoch_loss)[0:6], '     loss_ae: ', str(epoch_loss_ae)[0:6], '     loss_c: ', str(epoch_loss_c)[0:6], '     time: ', str(epoch_t)[0:4], 'sec')
             time_list.append(epoch_t)
@@ -165,6 +171,8 @@ class REDLAMP:
                 anomaly_mask = batch['anomaly_mask']
                 anomaly_mask = anomaly_mask.transpose(2,1).to(self.device) #(batch, window, n_features)
                 label = batch['label'].to(self.device)
+                if inputs.shape[0]==1: #BatchNorm of Classifier doesn't work if batchsize=1 -- matches train()'s own skip and Core-Clustering's unified _run_epoch (applied to both train and val there)
+                    continue
 
                 predicted, pred_label, pred_enc = self.model(inputs)
                 loss_aec, loss_ae, loss_c = self.model.calculate_loss(inputs, predicted, label, pred_label, anomaly_mask, epoch)
@@ -178,6 +186,12 @@ class REDLAMP:
                 loss_AE += loss_ae
                 loss_C += loss_c
                 step_count += 1
+            if step_count == 0:
+                # Matches Core-Clustering's trainer.py::_run_epoch's own
+                # step_count==0 guard -- avoids a ZeroDivisionError-equivalent
+                # (0/0 -> nan tensor here) if every val batch was skipped.
+                nan = torch.tensor([float('nan')], device=self.device)
+                return nan, nan, nan
             # Match train()'s own averaging convention (cum_loss/step_count) --
             # previously this summed across val batches instead of averaging,
             # so val_loss/val_loss_ae/val_loss_c scaled with each entity's
