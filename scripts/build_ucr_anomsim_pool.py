@@ -66,6 +66,13 @@ def add_ucr_entities(entities, ucr_domain_name, out_dir):
         meta = dict(type=ucr_domain_name, base_instance_id=i, base_seed=0,
                     n_time=int(Y.shape[1]), entity_dir=entity_dir, ucr_entity=entity)
         manifest_lines.append(json.dumps(meta))
+        # core_clustering.single_entity.load_single_entity_split (used by
+        # online_cli.py --single_entity) reads a per-entity meta.json, not
+        # just the pool-level _manifest.jsonl -- AnomSim_v1's own entities
+        # already ship one each, UCR entities need the same file written
+        # here or --single_entity fails with FileNotFoundError.
+        with open(os.path.join(entity_path, 'meta.json'), 'w') as f:
+            json.dump(meta, f)
         entity_dirs.append(entity_dir)
         print(f'  added {entity_dir}: n_time={Y.shape[1]} (UCR entity {entity}, train portion)')
     return manifest_lines, entity_dirs
