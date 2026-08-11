@@ -50,7 +50,8 @@ import full_reproduction_metrics as frm
 from TSB_UAD.vus.metrics import get_metrics
 
 DATASET = 'anomaly_archive'
-DEFAULT_ENTITIES = [str(i).zfill(3) for i in range(1, 251)]
+DEFAULT_ENTITIES = ['044', '045', '046', '047', '152', '153', '154', '155']  # UCR PowerDemand1-4, DISTORTED + plain
+ALL_ANOMALY_ARCHIVE_ENTITIES = [str(i).zfill(3) for i in range(1, 251)]  # full UCR sweep, pass via --entities
 DEFAULT_N_PCTS = [1, 3, 5, 10, 25, 50, 75, 100]
 DEFAULT_SEEDS = [0, 1, 2]
 METRIC_KEYS = frm.METRIC_KEYS

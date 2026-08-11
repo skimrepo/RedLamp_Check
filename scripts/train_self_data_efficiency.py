@@ -50,10 +50,12 @@ Two modes:
     script) concurrently, --max_parallel at a time -- same pattern as
     run_multiseed_training.py / train_ucr_self_via_core_clustering.py.
 
-SCALE WARNING: the default entity list is ALL 250 anomaly_archive
-subdatasets. 250 entities x 8 n_pcts x 3 seeds = 6000 jobs. Even filling
-GPU headroom via --max_parallel, this is a multi-day run -- pass a smaller
---entities/--n_pcts for a pilot first if you want a faster initial look.
+SCOPE: default entity list is just the 8 PowerDemand entities (044/045/
+046/047/152/153/154/155), matching this repo's other PowerDemand
+experiments -- 8 x 8 n_pcts x 3 seeds = 192 jobs, a few hours at most even
+sequential. Pass --entities [str(i).zfill(3) for i in range(1,251)] (all
+250 anomaly_archive subdatasets) to run the full UCR sweep instead -- that
+is a multi-day job even filling GPU headroom via --max_parallel.
 
 Resumable: skips a (entity, n_pct, seed) job whose bestmodel.pkl already
 exists (pass --force to override). An entity/n_pct combo too short to form
@@ -78,7 +80,8 @@ from loaders.dataset import Entity
 from loaders.loader_aug import Loader_aug
 
 DATASET = 'anomaly_archive'
-DEFAULT_ENTITIES = [str(i).zfill(3) for i in range(1, 251)]
+DEFAULT_ENTITIES = ['044', '045', '046', '047', '152', '153', '154', '155']  # UCR PowerDemand1-4, DISTORTED + plain
+ALL_ANOMALY_ARCHIVE_ENTITIES = [str(i).zfill(3) for i in range(1, 251)]  # full UCR sweep, pass via --entities
 DEFAULT_N_PCTS = [1, 3, 5, 10, 25, 50, 75, 100]
 DEFAULT_SEEDS = [0, 1, 2]
 WINDOW_SIZE = dg.WINDOW_SIZE
