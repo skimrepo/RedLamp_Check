@@ -34,6 +34,10 @@ def run():
     parser.add_argument('--output_dir', default='./result/DS_2/achievability/anomsim_bimodal_models')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=None, help='Default: online_cli.py\'s own default (128)')
+    parser.add_argument('--lr', type=float, default=None, help='Default: online_cli.py\'s own default (0.001) -- '
+                                                                 'consider raising alongside --batch_size')
+    parser.add_argument('--num_workers', type=int, default=None, help='Default: online_cli.py\'s own default (0)')
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args()
 
@@ -52,6 +56,12 @@ def run():
                '--seed', str(seed),
                '--gpu', str(args.gpu),
                '--epochs', str(args.epochs)]
+        if args.batch_size is not None:
+            cmd += ['--batch_size', str(args.batch_size)]
+        if args.lr is not None:
+            cmd += ['--lr', str(args.lr)]
+        if args.num_workers is not None:
+            cmd += ['--num_workers', str(args.num_workers)]
         if args.force:
             cmd.append('--force')
 
