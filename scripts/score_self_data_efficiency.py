@@ -10,16 +10,24 @@ directly from the SAME window_step train_self_data_efficiency.py computed
 for that entity (main.py's own dynamic rule), not looked up from an
 existing result/ folder.
 
-Records ALL data, at 3 levels:
-  - self_data_efficiency_raw.csv: one row per (entity, n_pct, seed) -- every
-    individual result, so any average below can be independently
-    re-derived/verified later.
-  - self_data_efficiency_per_entity_avg.csv: one row per (entity, n_pct) --
-    mean/std across seeds.
-  - self_data_efficiency_overall_summary.csv: one row per n_pct -- mean/std
-    of the per-entity seed-averaged metric ACROSS ALL SCORED ENTITIES. This
-    is the "how does each metric change with n_pct, across UCR as a whole"
-    table -- plot_self_data_efficiency.py reads this one directly.
+Records ALL data, at 3 levels (filenames use --out_prefix, default
+"self_data_efficiency"):
+  - {prefix}_raw.csv: one row per (entity, n_pct, seed) -- every individual
+    result, so any average below can be independently re-derived/verified
+    later.
+  - {prefix}_per_entity_avg.csv: one row per (entity, n_pct) -- mean/std
+    across seeds.
+  - {prefix}_overall_summary.csv: one row per n_pct -- mean/std of the
+    per-entity seed-averaged metric ACROSS ALL SCORED ENTITIES. This is the
+    "how does each metric change with n_pct, across UCR as a whole" table
+    -- plot_self_data_efficiency.py reads this one directly.
+
+--score_mode mse_only scores with pure reconstruction error instead of the
+default (mse_score+ce_score)/2 blend -- use this for models trained with
+train_self_data_efficiency.py --c_loss_ratio 0 (whose classifier head never
+got a gradient), and pass a distinct --out_prefix (e.g.
+"self_reconstruction_only") so its CSVs don't overwrite the combined-loss
+run's.
 
 Resumable: skips (entity, n_pct, seed) triples already in the raw CSV
 unless --force; entities/n_pct combos with no bestmodel.pkl (not yet
@@ -61,10 +69,17 @@ def fmt_pct(n_pct):
     return str(int(n_pct)) if float(n_pct).is_integer() else str(n_pct)
 
 
-def score_custom(entity, model_dir, window_step, params, device):
+def score_custom(entity, model_dir, window_step, params, device, score_mode='combined'):
     """Mirrors full_reproduction_metrics.score_entity's body exactly, minus
     the ci.discover_entity lookup -- disk_cfg is passed in directly instead
-    of being discovered from an existing result/ folder."""
+    of being discovered from an existing result/ folder.
+
+    score_mode='combined' (default): main.anomaly_scoreing's usual
+    (mse_score+ce_score)/2 blend -- use this for normally-trained models.
+    score_mode='mse_only': pure reconstruction-error score, no classifier
+    signal at all -- use this for models trained with train_self_data_efficiency.py
+    --c_loss_ratio 0, whose classifier head never received a gradient and
+    would just inject noise into the blended score."""
     disk_cfg = dict(downsampling=1, batch_size=128, window_size=100, window_step=window_step)
     dataparams = ci.build_dataparams(DATASET, entity, dg.CFG, disk_cfg)
     test_dl = datautils.load_dataloader_aug(
@@ -72,7 +87,10 @@ def score_custom(entity, model_dir, window_step, params, device):
     real_labels = frm.real_ground_truth_labels(DATASET, entity)
 
     inputs, prediction, anomaly_mask, label, pred_label, pred_enc = main.test(test_dl, model_dir, params, device)
-    score = main.anomaly_scoreing(inputs, prediction, pred_label)
+    if score_mode == 'mse_only':
+        _, score, _ = main.anomaly_scoreing(inputs, prediction, pred_label, return_components=True)
+    else:
+        score = main.anomaly_scoreing(inputs, prediction, pred_label)
     _, window_size, _ = inputs.shape
     score = np.concatenate([np.zeros(window_size - 1), score])
 
@@ -102,12 +120,18 @@ def run():
     parser.add_argument('--models_dir', default='./result/DS_2/achievability/self_data_efficiency_models')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--out_dir', default='./result/DS_2/achievability')
+    parser.add_argument('--out_prefix', default='self_data_efficiency',
+                         help='Filename prefix for the 3 output CSVs -- pass something like '
+                              '"self_reconstruction_only" when scoring --score_mode mse_only models so they '
+                              'don\'t overwrite the combined-loss run\'s CSVs.')
+    parser.add_argument('--score_mode', choices=['combined', 'mse_only'], default='combined',
+                         help='mse_only for models trained with --c_loss_ratio 0 (see train_self_data_efficiency.py)')
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args()
 
-    raw_csv = os.path.join(args.out_dir, 'self_data_efficiency_raw.csv')
-    per_entity_csv = os.path.join(args.out_dir, 'self_data_efficiency_per_entity_avg.csv')
-    overall_csv = os.path.join(args.out_dir, 'self_data_efficiency_overall_summary.csv')
+    raw_csv = os.path.join(args.out_dir, f'{args.out_prefix}_raw.csv')
+    per_entity_csv = os.path.join(args.out_dir, f'{args.out_prefix}_per_entity_avg.csv')
+    overall_csv = os.path.join(args.out_dir, f'{args.out_prefix}_overall_summary.csv')
 
     device = utils.init_dl_program(args.gpu, seed=args.seeds[0])
     model_args = ci.build_model_args(dg.CFG, dg.WINDOW_SIZE)
@@ -139,7 +163,7 @@ def run():
 
                 params = utils.AttrDict(seed=seed)
                 params.override(main.model_parameters(model_args))
-                result = score_custom(entity, model_dir, window_step, params, device)
+                result = score_custom(entity, model_dir, window_step, params, device, score_mode=args.score_mode)
                 if result is None:
                     continue
 

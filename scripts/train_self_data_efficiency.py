@@ -34,6 +34,15 @@ the standard 12-type list, min_range=1, min_features=max_features=1) --
 does not go through main.py's CLI, since main.py has no hook for
 truncating training data before its internal split.
 
+--c_loss_ratio (default 0.1, matching main.py) can be set to 0 for a
+reconstruction-only ablation: models/meta.py's calculate_loss collapses to
+pure loss_ae, so the classifier head gets zero gradient and never learns
+anything -- score these with score_self_data_efficiency.py's
+--score_mode mse_only, not the default blended score, or the untrained
+classifier's noise corrupts the result. E.g. "Self at 100% data, recon-only":
+  python3 scripts/train_self_data_efficiency.py --orchestrate --n_pcts 100 \
+      --c_loss_ratio 0 --output_dir ./result/DS_2/achievability/self_reconstruction_only_models
+
 Two modes:
   - Worker (default): trains ONE (--entity, --n_pct, --seed) job.
   - Orchestrator (--orchestrate): builds the full entities x n_pcts x seeds
@@ -116,7 +125,7 @@ def load_truncated_split(entity, n_pct):
     return train_entity, val_entity, window_step
 
 
-def train_one(entity, n_pct, seed, output_dir, gpu, epochs, force):
+def train_one(entity, n_pct, seed, output_dir, gpu, epochs, force, c_loss_ratio=0.1):
     model_dir = os.path.join(output_dir, entity, f'n{fmt_pct(n_pct)}_seed{seed}')
     if os.path.isfile(os.path.join(model_dir, 'bestmodel.pkl')) and not force:
         print(f'[skip] {model_dir}/bestmodel.pkl exists -- reusing')
@@ -138,9 +147,20 @@ def train_one(entity, n_pct, seed, output_dir, gpu, epochs, force):
     train_dl = Loader_aug(dataset=train_entity, shuffle=True, **loader_kwargs)
     val_dl = Loader_aug(dataset=val_entity, shuffle=True, **loader_kwargs)
     print(f'{entity}/n{fmt_pct(n_pct)}/seed{seed}: train={train_entity.Y.shape[1]}pts ({len(train_dl)} windows), '
-          f'val={val_entity.Y.shape[1]}pts ({len(val_dl)} windows), window_step={window_step}', flush=True)
+          f'val={val_entity.Y.shape[1]}pts ({len(val_dl)} windows), window_step={window_step}, '
+          f'c_loss_ratio={c_loss_ratio}', flush=True)
 
     model_args = ci.build_model_args(dg.CFG, WINDOW_SIZE)
+    # ci.build_model_args hardcodes 0.1 -- override AFTER building it, before
+    # main.model_parameters reads it into params_model.c_loss_ratio.
+    # c_loss_ratio=0 makes MetaAEC.calculate_loss's
+    # (1-c_loss_ratio)*loss_ae + c_loss_ratio*loss_c collapse to pure loss_ae
+    # (reconstruction-only training) -- the classifier head still runs a
+    # forward pass (needed for the model's own I/O shape) but gets zero
+    # gradient, so it never learns anything; score with --score_mode mse_only
+    # in score_self_data_efficiency.py to avoid blending in that untrained
+    # classifier's noise.
+    model_args.c_loss_ratio = c_loss_ratio
     params = utils.AttrDict(batch_size=128, lr=0.001, epoch=epochs, max_grad_norm=1.0, seed=seed)
     params.override(main.model_parameters(model_args))
 
@@ -155,7 +175,8 @@ def launch_worker(job, args, log_dir):
     log_file = open(log_path, 'w')
     cmd = [sys.executable, '-u', os.path.abspath(__file__),
            '--entity', job['entity'], '--n_pct', str(job['n_pct']), '--seed', str(job['seed']),
-           '--output_dir', args.output_dir, '--gpu', str(args.gpu), '--epochs', str(args.epochs)]
+           '--output_dir', args.output_dir, '--gpu', str(args.gpu), '--epochs', str(args.epochs),
+           '--c_loss_ratio', str(args.c_loss_ratio)]
     if args.force:
         cmd.append('--force')
     print(f'[launch] {tag} -> {log_path}', flush=True)
@@ -222,6 +243,11 @@ def run():
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--force', action='store_true')
+    parser.add_argument('--c_loss_ratio', type=float, default=0.1,
+                         help='Matches main.py\'s own default (0.1, combined AE+classifier loss). Pass 0 for '
+                              'reconstruction-only training (loss_ae alone) -- see train_one\'s own comment. '
+                              'Score reconstruction-only models with score_self_data_efficiency.py '
+                              '--score_mode mse_only, not the default blended score.')
     args = parser.parse_args()
 
     if args.orchestrate:
@@ -229,7 +255,8 @@ def run():
     else:
         if args.entity is None or args.n_pct is None:
             parser.error('worker mode needs --entity and --n_pct (or pass --orchestrate)')
-        ok = train_one(args.entity, args.n_pct, args.seed, args.output_dir, args.gpu, args.epochs, args.force)
+        ok = train_one(args.entity, args.n_pct, args.seed, args.output_dir, args.gpu, args.epochs, args.force,
+                        c_loss_ratio=args.c_loss_ratio)
         sys.exit(0 if ok else 1)
 
 
